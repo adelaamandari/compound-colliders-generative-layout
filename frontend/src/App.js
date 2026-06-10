@@ -10,18 +10,16 @@ import html2canvas from 'html2canvas';
 // CONSTANTS & CONFIG
 // ============================================
 const GRID_SIZE = 20;
-const SUBGRID_SIZE = 10;
+const SUBGRID_SIZE = 20; // Exactly 1x1m internal snapping
 const CAMERA_SETTINGS = { position: [0, 80, 80], fov: 40 };
 const PIXELS_PER_METER = 20;
 const FLOOR_TO_FLOOR_HEIGHT = 3.0; 
-
-// London Target Coordinates
 const LONDON_LATITUDE = 51.5074 * (Math.PI / 180);
 
 // ============================================
 // PROGRAMME FLOOR HEIGHTS & TYPES
 // ============================================
-const DOUBLE_HEIGHT_ROOMS = ["Lobby", "Library", "Mini Cinema", "Garden"];
+const DOUBLE_HEIGHT_ROOMS = ["Lobby", "Library", "Mini Cinema", "Garden", "3 Bedroom", "4 Bedroom"];
 
 function getRoomIsDoubleHeight(category) {
   const name = (category || '').split(' - ')[1] || category;
@@ -34,7 +32,8 @@ const PROGRAMME_FLOOR_HEIGHT = {
   "Core": 3.0, "Stairs": 3.0, "Corridor": 3.0,
   "Outdoor Playground": 3.0, "Shared Living Room": 3.0, "Shared Kitchen": 3.0,
   "Game Room": 3.0, "Workspace Room": 3.0, "Meeting Room": 3.0, "Concentration Pod": 3.0,
-  "Studio": 3.0, "1 Bedroom": 3.0, "2 Bedroom": 3.0, "3 Bedroom": 3.0, "4 Bedroom": 3.0,
+  "Studio": 3.0, "1 Bedroom": 3.0, "2 Bedroom": 3.0, 
+  "3 Bedroom": 6.0, "4 Bedroom": 6.0,
 };
 const DEFAULT_FLOOR_HEIGHT = 3.0;
 
@@ -60,14 +59,6 @@ function getRoomStructType(category) {
   return PROGRAMME_STRUCT_TYPE[name] || 'C1';
 }
 
-const STRUCT_TYPE_COLOR = {
-  C1: '#aaaaaa', C2A: '#7a9fc2', C2B: '#7ab89f',
-  C3: '#c2a37a', C4: '#c27a7a',
-};
-
-// ============================================
-// COLORS (LIGHT THEME)
-// ============================================
 const COLORS = {
   bgDark: '#f5f5f5', bgMedium: '#e0e0e0', bgLight: '#ffffff',
   borderDark: '#cccccc', borderMedium: '#d9d9d9', borderLight: '#ececec',
@@ -75,9 +66,6 @@ const COLORS = {
   accent: '#0056b3', accentDark: '#004494',
 };
 
-// ============================================
-// GRAPH HELPERS
-// ============================================
 const getSemanticColor = (category) => {
   if (!category) return '#cccccc';
   const cat = category.toLowerCase();
@@ -95,8 +83,66 @@ const getShortNodeName = (category, floor) => {
 };
 
 // ============================================
-// HELPERS
+// BOUNDARY ORTHOGONAL ALIGNMENT
 // ============================================
+const alignPolygonToOrthogonal = (polygon) => {
+  if (!polygon || polygon.length === 0) return { rotatedPoly: [], angle: 0, cx: 0, cy: 0, minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  
+  let maxLength = 0;
+  let angle = 0;
+  
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    
+    if (length > maxLength) {
+      maxLength = length;
+      angle = Math.atan2(dy, dx);
+    }
+  }
+  
+  if (angle > Math.PI / 2) angle -= Math.PI;
+  if (angle < -Math.PI / 2) angle += Math.PI;
+
+  const cx = polygon.reduce((sum, p) => sum + p[0], 0) / polygon.length;
+  const cy = polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length;
+
+  const rotatedPoly = polygon.map(p => {
+    const dx = p[0] - cx;
+    const dy = p[1] - cy;
+    const rx = Math.cos(-angle) * dx - Math.sin(-angle) * dy + cx;
+    const ry = Math.sin(-angle) * dx + Math.cos(-angle) * dy + cy;
+    return [rx, ry];
+  });
+
+  const minX = Math.min(...rotatedPoly.map(p => p[0]));
+  const maxX = Math.max(...rotatedPoly.map(p => p[0]));
+  const minY = Math.min(...rotatedPoly.map(p => p[1]));
+  const maxY = Math.max(...rotatedPoly.map(p => p[1]));
+
+  return { rotatedPoly, angle, cx, cy, minX, maxX, minY, maxY };
+};
+
+const processBoundary = (baseBoundary) => {
+  const poly = baseBoundary.metadata.polygon_pixels || [];
+  const aligned = alignPolygonToOrthogonal(poly);
+  return {
+    ...baseBoundary,
+    minX: aligned.minX, maxX: aligned.maxX,
+    minY: aligned.minY, maxY: aligned.maxY,
+    metadata: {
+       ...baseBoundary.metadata,
+       original_polygon_pixels: poly,
+       polygon_pixels: aligned.rotatedPoly,
+       alignment_angle: aligned.angle,
+       alignment_centroid: [aligned.cx, aligned.cy]
+    }
+  };
+};
+
 const calculateOptimalZoom = (boundary) => {
   if (!boundary) return { zoom: 1, pan: { x: 0, y: 0 } };
   const canvas = document.getElementById('canvas-container');
@@ -120,7 +166,6 @@ function pixelsToMeters(pixels) {
   return (pixels / PIXELS_PER_METER).toFixed(2);
 }
 
-// SOLAR MATH CALCULATOR FOR LONDON
 function getLondonSolarPosition(month, hour) {
   const dayOfYear = (month - 1) * 30 + 15;
   const declination = 23.45 * Math.sin((360 / 365) * (dayOfYear - 81) * (Math.PI / 180)) * (Math.PI / 180);
@@ -142,28 +187,40 @@ function getLondonSolarPosition(month, hour) {
 }
 
 // ============================================
-// CATALOG DATA
+// CATALOG DATA (Precise 1x1m Mapping)
 // ============================================
+// Footprints traced from the uploaded unit plans. All grids are integer
+// metres (1 cell = 1m), so gw*gh (minus notches) equals area in m².
 const CATALOG_DATA = {
   "Studio": [
-    { opt: "Option 10/10", area: 39, score: 0.97, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 6.5, gh: 6 },
-    { opt: "Option 9/10",  area: 39, score: 0.97, path: "20,30 20,0 100,0 100,100 0,100 0,30", variant: 1, gw: 7.5, gh: 6 },
+    // Compact L: 6x8 envelope, top-left 3x3 corner removed (tower on right)
+    { opt: "Layout A", area: 39, score: 0.95, path: "50,0 100,0 100,100 0,100 0,37.5 50,37.5", variant: 0, gw: 6, gh: 8 },
+    // Linear: 10x4 envelope, both bottom corners notched
+    { opt: "Layout B", area: 38, score: 0.90, path: "0,0 100,0 100,75 90,75 90,100 10,100 10,75 0,75", variant: 1, gw: 10, gh: 4 },
   ],
   "1 Bedroom": [
-    { opt: "Option 10/10", area: 51, score: 0.94, path: "0,0 50,0 50,20 75,20 75,40 100,40 100,100 0,100", variant: 0, gw: 8.5, gh: 6 },
-    { opt: "Option 8/10",  area: 51, score: 0.94, path: "0,0 60,0 60,40 100,40 100,100 0,100", variant: 1, gw: 9, gh: 6 },
+    // 8x7 envelope, bedroom tower top-right, top-left 5x1 strip removed
+    { opt: "Layout A", area: 51, score: 0.94, path: "62.5,0 100,0 100,100 0,100 0,14.3 62.5,14.3", variant: 0, gw: 8, gh: 7 },
+    // 9x6 envelope, bedroom tower top-right, top-left 3x1 strip removed
+    { opt: "Layout B", area: 51, score: 0.92, path: "33.3,0 100,0 100,100 0,100 0,16.7 33.3,16.7", variant: 1, gw: 9, gh: 6 },
   ],
   "2 Bedroom": [
-    { opt: "Option 5/10",  area: 60, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 6 },
-    { opt: "Option 10/10", area: 60, score: 0.95, path: "0,0 70,0 70,40 100,40 100,100 0,100", variant: 1, gw: 10, gh: 6 },
+    // 10x6 rectangle
+    { opt: "Layout A", area: 60, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 6 },
+    // 11x6 envelope, top-right 6x1 corner removed
+    { opt: "Layout B", area: 60, score: 0.93, path: "0,0 45.5,0 45.5,16.7 100,16.7 100,100 0,100", variant: 1, gw: 11, gh: 6 },
   ],
   "3 Bedroom": [
-    { opt: "Option 9/10",  area: 75, score: 0.96, path: "30,30 30,0 100,0 100,100 0,100 0,30", variant: 1, gw: 10, gh: 7.5 },
-    { opt: "Option 4/10",  area: 75, score: 0.94, path: "0,0 70,0 70,40 100,40 100,100 0,100", variant: 2, gw: 10, gh: 7.5 },
+    // 14x7 L: bedrooms right/lower, top-left 4x2 corner removed
+    { opt: "Layout A", area: 90, score: 0.96, path: "28.6,0 100,0 100,100 0,100 0,28.6 28.6,28.6", variant: 0, gw: 14, gh: 7 },
+    // 12x7 rectangle
+    { opt: "Layout B", area: 84, score: 0.89, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 12, gh: 7 },
   ],
   "4 Bedroom": [
-    { opt: "Option 9/10",  area: 90, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 9 },
-    { opt: "Option 8/10",  area: 90, score: 0.98, path: "0,0 70,0 70,50 100,50 100,100 0,100", variant: 1, gw: 10, gh: 9 },
+    // 11x9 rectangle
+    { opt: "Layout A", area: 99, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 11, gh: 9 },
+    // 13x8 rectangle
+    { opt: "Layout B", area: 104, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 13, gh: 8 },
   ],
 };
 
@@ -199,7 +256,6 @@ const residentialComponents = ["Studio", "1 Bedroom", "2 Bedroom", "3 Bedroom", 
 // ============================================
 // 3D COMPONENTS
 // ============================================
-
 const SceneCapturer = ({ sceneRef }) => {
   const { scene } = useThree();
   useEffect(() => { sceneRef.current = scene; }, [scene, sceneRef]);
@@ -209,8 +265,8 @@ const SceneCapturer = ({ sceneRef }) => {
 const Boundary3D = ({ boundary, scale }) => {
   const poly = boundary?.metadata?.polygon_pixels;
   if (!poly || poly.length === 0) return null;
-  const cx = (boundary.minX + boundary.maxX) / 2 || 400;
-  const cy = (boundary.minY + boundary.maxY) / 2 || 300;
+  const cx = boundary.metadata.alignment_centroid[0];
+  const cy = boundary.metadata.alignment_centroid[1];
   return (
     <group>
       {poly.map((point, i) => {
@@ -238,8 +294,8 @@ const ModularMesh = ({ room, scale, boundary }) => {
   const d = unrotatedHeight / scale;
   const h = room.floor_height || getRoomFloorHeight(room.category);
 
-  const cx = (boundary?.minX + boundary?.maxX) / 2 || 400;
-  const cy = (boundary?.minY + boundary?.maxY) / 2 || 300;
+  const cx = boundary?.metadata?.alignment_centroid?.[0] || 400;
+  const cy = boundary?.metadata?.alignment_centroid?.[1] || 300;
 
   const x = (room.x + room.width  / 2 - cx) / scale;
   const z = (room.y + room.height / 2 - cy) / scale;
@@ -316,15 +372,13 @@ function App() {
   const [selectedRoomId,      setSelectedRoomId]      = useState(null);
   const [exportMenu,          setExportMenu]          = useState({ visible: false, x: 0, y: 0, imageData: null, fileName: '' });
 
-  // Solar state
   const [solarMonth, setSolarMonth] = useState(6); 
   const [solarHour, setSolarHour] = useState(14);  
 
-  const [siteBoundary, setSiteBoundary] = useState({
+  const [siteBoundary, setSiteBoundary] = useState(() => processBoundary({
     type: "Polygon",
-    minX: 150, maxX: 939, minY: 150, maxY: 1232,
     name: "Imported Boundary JSON",
-    gridSize: 15,
+    gridSize: 20,
     metadata: {
       original_area_m2: 1499,
       grid_cell_size_m: 2,
@@ -334,7 +388,7 @@ function App() {
         [863, 914],[847, 959],[848, 1012]
       ]
     }
-  });
+  }));
 
   const [canvasZoom,       setCanvasZoom]       = useState(1);
   const [canvasPan,        setCanvasPan]        = useState({ x: 0, y: 0 });
@@ -547,8 +601,8 @@ function App() {
     const category = isResidential ? 'Residential Unit' : communalType;
     const { bg, border } = colorMap[category] || { bg: 'rgba(100,100,100,0.4)', border: '#999' };
 
-    const cx = (siteBoundary.minX + siteBoundary.maxX) / 2 || 400;
-    const cy = (siteBoundary.minY + siteBoundary.maxY) / 2 || 300;
+    const cx = siteBoundary?.metadata?.alignment_centroid?.[0] || 400;
+    const cy = siteBoundary?.metadata?.alignment_centroid?.[1] || 300;
 
     return {
       id:               `${itemName} (${Math.floor(Math.random() * 10000)})`,
@@ -682,8 +736,9 @@ function App() {
       const response = await fetch('http://127.0.0.1:8000/api/parse-void-boundary', { method: 'POST', body: formData });
       const data = await response.json();
       if (data.status === 'success') {
-        setSiteBoundary(data.boundary);
-        const { zoom, pan } = calculateOptimalZoom(data.boundary);
+        const processed = processBoundary(data.boundary);
+        setSiteBoundary(processed);
+        const { zoom, pan } = calculateOptimalZoom(processed);
         setCanvasZoom(zoom); setCanvasPan(pan);
       } else {
         alert(`Error: ${data.message}`);
@@ -764,22 +819,38 @@ function App() {
     };
   }, [rooms]);
 
-  const buildFloorExportData = (floorNum) => ({
-    floor: floorNum,
-    residents: getResidentsForFloor(floorNum),
-    rooms: rooms.filter(r => r.floor === floorNum).map(r => ({
-      id: r.id, category: r.category, floor: r.floor,
-      rotation: r.rotation, flipX: r.flipX,
-      shapeVariant: r.shapeVariant, shapePath: r.shapePath,
-      optName: r.optName || null, score: r.score || null,
-      area_m2: r.area, width_px: r.width, height_px: r.height,
-      coordinates: { x: r.x, y: r.y },
-      floor_height_m: r.floor_height || getRoomFloorHeight(r.category),
-      struct_type:    r.struct_type  || getRoomStructType(r.category),
-      is_double_height: (r.floor_height || getRoomFloorHeight(r.category)) > FLOOR_TO_FLOOR_HEIGHT,
-      daylight_score: r.daylight_score || null
-    }))
-  });
+  const buildFloorExportData = (floorNum) => {
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const cx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const cy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
+
+    return {
+      floor: floorNum,
+      residents: getResidentsForFloor(floorNum),
+      rooms: rooms.filter(r => r.floor === floorNum).map(r => {
+        const roomCx = r.x + r.width / 2;
+        const roomCy = r.y + r.height / 2;
+        const trueCx = Math.cos(alignAngle) * (roomCx - cx) - Math.sin(alignAngle) * (roomCy - cy) + cx;
+        const trueCy = Math.sin(alignAngle) * (roomCx - cx) + Math.cos(alignAngle) * (roomCy - cy) + cy;
+        
+        return {
+          id: r.id, category: r.category, floor: r.floor,
+          local_rotation: r.rotation, 
+          true_rotation: r.rotation + (alignAngle * 180 / Math.PI),
+          flipX: r.flipX,
+          shapeVariant: r.shapeVariant, shapePath: r.shapePath,
+          optName: r.optName || null, score: r.score || null,
+          area_m2: r.area, width_px: r.width, height_px: r.height,
+          local_coordinates: { x: r.x, y: r.y },
+          true_centroid: { x: trueCx, y: trueCy },
+          floor_height_m: r.floor_height || getRoomFloorHeight(r.category),
+          struct_type:    r.struct_type  || getRoomStructType(r.category),
+          is_double_height: (r.floor_height || getRoomFloorHeight(r.category)) > FLOOR_TO_FLOOR_HEIGHT,
+          daylight_score: r.daylight_score || null
+        }
+      })
+    };
+  };
 
   const triggerJSONDownload = (data, filename) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -815,8 +886,9 @@ function App() {
       'Public Buffer Zone': 'mat_public_buffer',
     };
 
-    const pxCx  = (siteBoundary.minX + siteBoundary.maxX) / 2;
-    const pxCy  = (siteBoundary.minY + siteBoundary.maxY) / 2;
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const pxCx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const pxCy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
     const pxToM = (px) => px / PIXELS_PER_METER;
 
     let mtl = '# LinX Massing Export — Material Library\n';
@@ -829,9 +901,6 @@ function App() {
     let vertOffset = 1;
 
     rooms.forEach((room, idx) => {
-      const cx_m = pxToM(room.x + room.width / 2  - pxCx);
-      const cy_m = -pxToM(room.y + room.height / 2 - pxCy);
-
       const isRotated = room.rotation % 180 !== 0;
       const w_m = pxToM(isRotated ? room.height : room.width);
       const d_m = pxToM(isRotated ? room.width  : room.height);
@@ -853,9 +922,22 @@ function App() {
       const cosR = Math.cos(rad), sinR = Math.sin(rad);
       const rotVerts = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
 
-      const bottomVerts = rotVerts.map(([lx, ly]) => [cx_m + lx, floorBase, cy_m + ly]);
-      const topVerts    = rotVerts.map(([lx, ly]) => [cx_m + lx, floorTop,  cy_m + ly]);
-      const n = rotVerts.length;
+      const roomPxCx = room.x + room.width / 2;
+      const roomPxCy = room.y + room.height / 2;
+
+      const trueVerts = rotVerts.map(([lx, ly]) => {
+          const centerDistX_m = (roomPxCx - pxCx) / PIXELS_PER_METER;
+          const centerDistY_m = (roomPxCy - pxCy) / PIXELS_PER_METER;
+          const localMx = centerDistX_m + lx;
+          const localMy = centerDistY_m + ly;
+          const trueMx = Math.cos(alignAngle) * localMx - Math.sin(alignAngle) * localMy;
+          const trueMy = Math.sin(alignAngle) * localMx + Math.cos(alignAngle) * localMy;
+          return [trueMx, trueMy * -1]; 
+      });
+
+      const bottomVerts = trueVerts.map(([tx, tz]) => [tx, floorBase, tz]);
+      const topVerts    = trueVerts.map(([tx, tz]) => [tx, floorTop,  tz]);
+      const n = trueVerts.length;
 
       const catKey  = Object.keys(MAT_NAMES).find(k => room.category.startsWith(k)) || 'Residential Unit';
       const safeName = room.id.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -887,16 +969,15 @@ function App() {
 
   const handleExportWireframeOBJ = () => {
     if (rooms.length === 0) return alert("No rooms to export.");
-    const pxCx = (siteBoundary.minX + siteBoundary.maxX) / 2;
-    const pxCy = (siteBoundary.minY + siteBoundary.maxY) / 2;
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const pxCx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const pxCy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
     const pxToM = (px) => px / PIXELS_PER_METER;
 
     let obj = '# LinX Structural Wireframe — Meters\n\n';
     let vertOffset = 1;
 
     rooms.forEach((room, idx) => {
-      const cx_m = pxToM(room.x + room.width / 2  - pxCx);
-      const cy_m = -pxToM(room.y + room.height / 2 - pxCy);
       const isRotated = room.rotation % 180 !== 0;
       const w_m = pxToM(isRotated ? room.height : room.width);
       const d_m = pxToM(isRotated ? room.width  : room.height);
@@ -912,12 +993,27 @@ function App() {
         if (room.flipX) lx = -lx;
         return [lx, ly];
       });
+      
       const rad = (room.rotation * Math.PI) / 180;
       const cosR = Math.cos(rad), sinR = Math.sin(rad);
-      const rotVerts   = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
-      const bottomVerts = rotVerts.map(([lx, ly]) => [cx_m + lx, floorBase, cy_m + ly]);
-      const topVerts    = rotVerts.map(([lx, ly]) => [cx_m + lx, floorTop,  cy_m + ly]);
-      const n = rotVerts.length;
+      const rotVerts = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
+      
+      const roomPxCx = room.x + room.width / 2;
+      const roomPxCy = room.y + room.height / 2;
+
+      const trueVerts = rotVerts.map(([lx, ly]) => {
+          const centerDistX_m = (roomPxCx - pxCx) / PIXELS_PER_METER;
+          const centerDistY_m = (roomPxCy - pxCy) / PIXELS_PER_METER;
+          const localMx = centerDistX_m + lx;
+          const localMy = centerDistY_m + ly;
+          const trueMx = Math.cos(alignAngle) * localMx - Math.sin(alignAngle) * localMy;
+          const trueMy = Math.sin(alignAngle) * localMx + Math.cos(alignAngle) * localMy;
+          return [trueMx, trueMy * -1]; 
+      });
+
+      const bottomVerts = trueVerts.map(([tx, tz]) => [tx, floorBase, tz]);
+      const topVerts    = trueVerts.map(([tx, tz]) => [tx, floorTop,  tz]);
+      const n = trueVerts.length;
 
       obj += `\no wireframe_${idx}_${room.id.replace(/[^a-zA-Z0-9_]/g, '_')}\n`;
       [...bottomVerts, ...topVerts].forEach(([x, y, z]) => { obj += `v ${x.toFixed(4)} ${y.toFixed(4)} ${z.toFixed(4)}\n`; });
@@ -938,6 +1034,7 @@ function App() {
   };
 
   const sunPos = getLondonSolarPosition(solarMonth, solarHour);
+  const alignAngleDeg = (siteBoundary.metadata.alignment_angle || 0) * (180 / Math.PI);
 
   // ============================================
   // RENDER
@@ -1072,8 +1169,7 @@ function App() {
             <div style={{ fontSize: '10px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>SITE:</span> {siteBoundary.name}</div>
               {siteBoundary.metadata?.original_area_m2 && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>AREA:</span> {siteBoundary.metadata.original_area_m2.toFixed(0)} m²</div>}
-              {siteBoundary.metadata?.grid_cell_size_m  && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>GRID:</span> {siteBoundary.metadata.grid_cell_size_m}m cells</div>}
-              <div><span style={{ fontWeight: '600' }}>DIMS:</span> {pixelsToMeters(siteBoundary.maxX - siteBoundary.minX)}m × {pixelsToMeters(siteBoundary.maxY - siteBoundary.minY)}m</div>
+              <div><span style={{ fontWeight: '600' }}>OFFSET:</span> {alignAngleDeg.toFixed(1)}° True North</div>
             </div>
           </div>
 
@@ -1158,7 +1254,6 @@ function App() {
                 <div style={{ background: 'rgba(255,255,255,0.8)', padding: '15px', borderRadius: '8px', marginBottom: '15px', border: `1px solid ${COLORS.borderMedium}` }}>
                   <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '14px', fontWeight: '600' }}>3D Massing Model</h3>
                   <p style={{ margin: 0, fontSize: '11px', color: COLORS.textSecondary }}>Left Click = Orbit | Right Click = Pan | Scroll = Zoom</p>
-                  <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: COLORS.accent, fontWeight: '600' }}>London Solar Path active.</p>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Massing .OBJ</button>
@@ -1218,13 +1313,18 @@ function App() {
                   <div style={{ flex: 1, position: 'relative', background: COLORS.bgLight, overflow: 'hidden' }} id="canvas-container">
                     <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, transform: `translate(${canvasPan.x}px, ${canvasPan.y}px) scale(${canvasZoom})`, transformOrigin: '0 0', cursor: isDraggingCanvas ? 'grabbing' : 'grab', zIndex: 1 }}>
 
+                      {/* TRUE 1x1m Visual Grid matched to internally snapping at 20px */}
                       <svg width="100%" height="100%" style={{ position: 'absolute', top: 0, left: 0, overflow: 'visible' }} id="canvas-svg">
                         <defs>
-                          <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
-                            <path d="M 60 0 L 0 0 0 60" fill="none" stroke={COLORS.borderMedium} strokeWidth="1.5" />
+                          <pattern id="smallGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                            <path d="M 20 0 L 0 0 0 20" fill="none" stroke={COLORS.borderMedium} strokeWidth="0.5" />
+                          </pattern>
+                          <pattern id="grid" width="100" height="100" patternUnits="userSpaceOnUse">
+                            <rect width="100" height="100" fill="url(#smallGrid)" />
+                            <path d="M 100 0 L 0 0 0 100" fill="none" stroke={COLORS.borderDark} strokeWidth="1" />
                           </pattern>
                         </defs>
-                        <rect id="canvas-background" x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid)" opacity="0.6" />
+                        <rect id="canvas-background" x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid)" opacity="0.4" />
 
                         {siteBoundary.metadata?.polygon_pixels?.length > 0 ? (
                           <>
@@ -1277,7 +1377,6 @@ function App() {
                           const displayName = room.category.split(' - ')[1];
                           const displayArea = room.area || getCalculatedRoomAreaM2(room.width, room.height, displayName, COMMUNAL_GW_GH, GRID_SIZE);
                           
-                          // Styling for Daylight Score
                           const hasScore = room.daylight_score !== undefined && room.daylight_score !== null;
                           const scoreColor = !hasScore ? '' : room.daylight_score >= 0.4 ? '#6db388' : room.daylight_score >= 0.2 ? '#c2a37a' : '#b86868';
                           const isWarning = hasScore && room.daylight_score < 0.2;
@@ -1337,7 +1436,7 @@ function App() {
                                     
                                     {/* Daylight Badge */}
                                     {hasScore && (
-                                      <span style={{ fontSize: '7px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
+                                      <span style={{ fontSize: '8px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
                                         Daylight: {Math.round(room.daylight_score * 100)}%
                                       </span>
                                     )}
@@ -1351,9 +1450,8 @@ function App() {
                     </div>
                   </div>
 
-                  {/* North arrow */}
                   <div className="no-export" style={{ position: 'absolute', bottom: '30px', left: '30px', zIndex: 20, pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                    <svg width="40" height="60" viewBox="0 0 40 60" fill="none">
+                    <svg width="40" height="60" viewBox="0 0 40 60" fill="none" style={{ transform: `rotate(${alignAngleDeg}deg)` }}>
                       <path d="M20 0 L40 40 L20 30 L0 40 Z" fill="#b86868" />
                       <text x="20" y="55" fill="#333333" fontSize="14px" fontWeight="bold" textAnchor="middle" fontFamily="'Barlow', sans-serif">N</text>
                     </svg>

@@ -42,7 +42,7 @@ class Room(BaseModel):
     floor_height: Optional[float] = None
     struct_type: Optional[str] = None
     is_double_height: Optional[bool] = False  
-    daylight_score: Optional[float] = None  # Percentage of perimeter exposed to exterior
+    daylight_score: Optional[float] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -55,7 +55,7 @@ class BoundaryConfig(BaseModel):
     maxY: Optional[float] = 570
     coordinates: Optional[List[List[float]]] = None
     name: str = "Default Site"
-    gridSize: Optional[float] = 15
+    gridSize: Optional[float] = 20
     unit: str = "pixels"
     metadata: Optional[dict] = None
 
@@ -96,8 +96,8 @@ PROGRAMME_FLOOR_HEIGHT = {
     "Studio":             3.0,
     "1 Bedroom":          3.0,
     "2 Bedroom":          3.0,
-    "3 Bedroom":          3.0,
-    "4 Bedroom":          3.0,
+    "3 Bedroom":          6.0,
+    "4 Bedroom":          6.0,
 }
 DEFAULT_FLOOR_HEIGHT = 3.0
 
@@ -150,42 +150,34 @@ states = [
 ]
 adjacency_matrix = {a: {b: 1.0 for b in states} for a in states}
 
-
 def set_weight(a, b, w):
     if a in adjacency_matrix and b in adjacency_matrix:
         adjacency_matrix[a][b] = w
         adjacency_matrix[b][a] = w
 
-# Primary Circulation
 set_weight("Corridor", "Core", 10.0)
 set_weight("Stairs", "Core", 10.0)
 set_weight("Stairs", "Corridor", 5.0)
 
-# Lobby weight
 set_weight("LB", "Core", 15.0)
 set_weight("LB", "Corridor", 5.0)
 
-# Residential → Corridor
 for res in ["S1", "S2", "S3", "S4", "S5"]:
     set_weight(res, "Corridor", 5.0)
 
-# Private Communal → Corridor
 for pc in ["SK", "SL", "GR", "W", "L", "CP", "MR"]:
     set_weight(pc, "Corridor", 4.0)
 
-# Public Buffer → Corridor / Core / Residential
 for pb in ["MH", "MC", "GYM", "ER", "IP", "G", "OP"]:
     set_weight(pb, "Corridor", 2.0)
     set_weight(pb, "Core", 2.0)
     for res in ["S1", "S2", "S3", "S4", "S5"]:
         set_weight(pb, res, 2.0)
 
-# Specific user-type links
 set_weight("S1", "SK", 3.0); set_weight("S1", "SL", 3.0)
 set_weight("S2", "W", 3.0);  set_weight("S2", "CP", 3.0)
 set_weight("S3", "IP", 3.0); set_weight("S4", "G", 3.0); set_weight("S5", "OP", 3.0)
 set_weight("L", "GR", 0.0);  set_weight("L", "SL", 0.0)
-
 
 def get_shortcode(category_str):
     name = category_str.split(" - ")[-1]
@@ -215,20 +207,17 @@ def point_in_polygon(x, y, poly):
         p1x, p1y = p2x, p2y
     return inside
 
-
 def is_within_bounds(x, y, w, h, poly, mx, Mx, my, My):
     if poly:
         pts = [(x, y), (x+w, y), (x, y+h), (x+w, y+h), (x+w/2, y+h/2)]
         return all(point_in_polygon(px, py, poly) for px, py in pts)
     return x >= mx and y >= my and x + w <= Mx and y + h <= My
 
-
 def is_overlap(x, y, w, h, floor, occupancy):
     for ox, oy, ow, oh in occupancy.get(floor, []):
         if not (x + w <= ox or ox + ow <= x or y + h <= oy or oy + oh <= y):
             return True
     return False
-
 
 # ============================================================
 # LAYOUT ENGINE
@@ -238,7 +227,7 @@ def is_overlap(x, y, w, h, floor, occupancy):
 def auto_layout(request: LayoutRequest):
     rooms = request.rooms
     boundary = request.boundary
-    snap_grid = 10
+    snap_grid = 20  
     randomize = request.randomize
 
     poly_pixels = boundary.metadata.get("polygon_pixels") if boundary and boundary.metadata else None
@@ -251,7 +240,8 @@ def auto_layout(request: LayoutRequest):
     center_y = (min_y + max_y) / 2
 
     placed_rooms = []
-    occupancy = {f: [] for f in range(1, 10)}
+    # Expanded floor tracking to handle multi-floor projections
+    occupancy = {f: [] for f in range(1, 20)}
 
     for r in rooms:
         r.floor_height = get_floor_height(r.category)
@@ -263,7 +253,10 @@ def auto_layout(request: LayoutRequest):
         if r.id.startswith("AutoCorridor"):
             continue
         if r.pinned:
-            occupancy[r.floor].append((r.x, r.y, r.width, r.height))
+            # PROJECT VOIDS UPWARDS: Calculate how many floors this room spans
+            num_floors = int(max(1, round(r.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
+            for f in range(r.floor, r.floor + num_floors):
+                occupancy[f].append((r.x, r.y, r.width, r.height))
             placed_rooms.append(r)
         else:
             unpinned_rooms.append(r)
@@ -280,7 +273,6 @@ def auto_layout(request: LayoutRequest):
         communals  = [r for r in floor_rooms if "Communal" in r.category or "Buffer" in r.category]
         residential = [r for r in floor_rooms if r not in cores and r not in corridors and r not in communals]
 
-        # 1. Core placement
         for core in cores:
             floor_occ = occupancy.get(floor_num, [])
             if not floor_occ:
@@ -288,8 +280,8 @@ def auto_layout(request: LayoutRequest):
             else:
                 best_dist = -1
                 best_pos = (center_x, center_y)
-                for x in range(min_x, max_x, 40):
-                    for y in range(min_y, max_y, 40):
+                for x in range(min_x, max_x, snap_grid * 2):
+                    for y in range(min_y, max_y, snap_grid * 2):
                         if is_within_bounds(x, y, core.width, core.height, poly_pixels, min_x, max_x, min_y, max_y):
                             if not is_overlap(x, y, core.width, core.height, floor_num, occupancy):
                                 min_dist = min(
@@ -308,10 +300,13 @@ def auto_layout(request: LayoutRequest):
                 cx, cy = min_x + snap_grid, min_y + snap_grid
 
             core.x, core.y, core.pinned = cx, cy, True
-            occupancy[floor_num].append((cx, cy, core.width, core.height))
+            
+            # PROJECT VOIDS UPWARDS
+            num_floors = int(max(1, round(core.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
+            for f in range(core.floor, core.floor + num_floors):
+                occupancy[f].append((cx, cy, core.width, core.height))
             placed_rooms.append(core)
 
-        # 2. Pack remaining rooms
         pack_order = corridors + communals + residential
         if randomize:
             random.shuffle(corridors)
@@ -355,6 +350,7 @@ def auto_layout(request: LayoutRequest):
 
                 if not is_within_bounds(cx, cy, room.width, room.height, poly_pixels, min_x, max_x, min_y, max_y):
                     continue
+                # Overlap check now correctly sees upper-floor voids projected from below
                 if is_overlap(cx, cy, room.width, room.height, floor_num, occupancy):
                     continue
 
@@ -407,11 +403,15 @@ def auto_layout(request: LayoutRequest):
 
             if best_pos:
                 room.x, room.y = best_pos
-                occupancy[floor_num].append((room.x, room.y, room.width, room.height))
+                
+                # PROJECT VOIDS UPWARDS
+                num_floors = int(max(1, round(room.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
+                for f in range(room.floor, room.floor + num_floors):
+                    occupancy[f].append((room.x, room.y, room.width, room.height))
+                
                 placed_rooms.append(room)
 
     # 3. Daylight Scoring Heuristic
-    # Calculate the percentage of exposed perimeter for Residential Units
     for room in placed_rooms:
         if "Residential" in room.category:
             total_perim = 2 * (room.width + room.height)
@@ -421,14 +421,11 @@ def auto_layout(request: LayoutRequest):
                 if p.id == room.id or p.floor != room.floor:
                     continue
                 
-                # Check overlapping edges
                 dx = max(0, min(room.x + room.width, p.x + p.width) - max(room.x, p.x))
                 dy = max(0, min(room.y + room.height, p.y + p.height) - max(room.y, p.y))
                 
-                # If touching horizontally
                 if dy > 0 and (abs(room.x - (p.x + p.width)) < 1 or abs((room.x + room.width) - p.x) < 1):
                     blocked_perim += dy
-                # If touching vertically
                 if dx > 0 and (abs(room.y - (p.y + p.height)) < 1 or abs((room.y + room.height) - p.y) < 1):
                     blocked_perim += dx
             
