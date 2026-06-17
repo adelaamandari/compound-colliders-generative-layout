@@ -15,9 +15,9 @@ const SUBGRID_SIZE = 20; // Exactly 1x1m internal snapping
 const CAMERA_SETTINGS = { position: [0, 80, 80], fov: 40 };
 const PIXELS_PER_METER = 20;
 const FLOOR_TO_FLOOR_HEIGHT = 3.0;
-// Green areas / gardens are a thin green massing — visible volume but well under one
-// storey, so they never project as a void onto floors added above them.
-const GREEN_AREA_HEIGHT = 1.5;
+// Green areas / gardens render as a thin 20cm green ground plane (vs. the 3m walls),
+// well under one storey so they never project as a void onto floors added above them.
+const GREEN_AREA_HEIGHT = 0.2;
 const LONDON_LATITUDE = 51.5074 * (Math.PI / 180);
 
 // ============================================
@@ -32,7 +32,7 @@ function getRoomIsDoubleHeight(category) {
 
 const PROGRAMME_FLOOR_HEIGHT = {
   "Lobby": 6.0, "Library": 6.0, "Mini Cinema": 6.0, "Garden": 6.0, "Multipurpose Hall": 6.0,
-  "Gym": 4.5, "Events Room": 4.5, "Indoor Play Area": 4.5,
+  "Gym": 3.0, "Events Room": 3.0, "Indoor Play Area": 3.0,
   "Core": 3.0, "Stairs": 3.0, "Corridor": 3.0,
   "Outdoor Playground": 3.0, "Shared Living Room": 3.0, "Shared Kitchen": 3.0,
   "Game Room": 3.0, "Workspace Room": 3.0, "Meeting Room": 3.0, "Concentration Pod": 3.0,
@@ -65,9 +65,9 @@ function getRoomStructType(category) {
 
 // Monochrome (greys + white) palette with maroon-red accents for emphasis.
 const COLORS = {
-  bgDark: '#f4f3f1', bgMedium: '#e8e6e2', bgLight: '#ffffff',
-  borderDark: '#c2bfba', borderMedium: '#d8d5d0', borderLight: '#ececea',
-  textPrimary: '#2b2a28', textSecondary: '#6e6a64', textTertiary: '#a09c95',
+  bgDark: '#f1f3f5', bgMedium: '#e4e7ea', bgLight: '#ffffff',
+  borderDark: '#b9bfc5', borderMedium: '#d3d8dd', borderLight: '#eaedf0',
+  textPrimary: '#23282d', textSecondary: '#5f676e', textTertiary: '#969da4',
   accent: '#4f1717', accentDark: '#360f0f',
 };
 
@@ -486,7 +486,7 @@ const getCalculatedRoomAreaM2 = (roomWidth, roomHeight, roomName, communalGwGh, 
 function App() {
   useEffect(() => {
     const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600;700&display=swap';
+    link.href = 'https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600;700&display=swap';
     link.rel = 'stylesheet';
     document.head.appendChild(link);
   }, []);
@@ -1240,7 +1240,7 @@ function App() {
   // RENDER
   // ============================================
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: "'Barlow', sans-serif", background: COLORS.bgDark }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", background: COLORS.bgDark }}>
 
       {/* Export context menu */}
       {exportMenu.visible && (
@@ -1256,14 +1256,14 @@ function App() {
             background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`,
             boxShadow: '0 4px 12px rgba(0,0,0,0.15)', borderRadius: '4px',
             padding: '4px 0', display: 'flex', flexDirection: 'column',
-            minWidth: '140px', fontFamily: "'Barlow', sans-serif", zIndex: 10001
+            minWidth: '140px', fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", zIndex: 10001
           }}>
             {[
               { label: 'Save image as...', action: () => { const a = document.createElement('a'); a.download = exportMenu.fileName; a.href = exportMenu.imageData; a.click(); } },
               { label: 'Copy image', action: async () => { try { const res = await fetch(exportMenu.imageData); const blob = await res.blob(); await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]); } catch { alert('Failed to copy image.'); } } }
             ].map(item => (
               <div key={item.label}
-                style={{ padding: '8px 16px', fontSize: '9px', color: COLORS.textPrimary, cursor: 'pointer' }}
+                style={{ padding: '8px 16px', fontSize: '12px', color: COLORS.textPrimary, cursor: 'pointer' }}
                 onMouseEnter={e => e.currentTarget.style.background = COLORS.bgMedium}
                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                 onClick={item.action}
@@ -1274,20 +1274,22 @@ function App() {
       )}
 
       {/* TOP BAR */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.bgMedium, color: COLORS.textPrimary, padding: '15px 30px', borderBottom: `1px solid ${COLORS.borderMedium}`, zIndex: 999 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.bgMedium, color: COLORS.textPrimary, padding: '15px 30px', borderBottom: `1px solid ${COLORS.borderMedium}`, zIndex: 999, fontSize: '14px', textTransform: 'uppercase' }}>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
           <div style={{ display: 'flex', gap: '5px' }}>
             <button onClick={handleUndo} disabled={historyStep === 0} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === 0 ? 0.5 : 1 }}>↶</button>
             <button onClick={handleRedo} disabled={historyStep === history.length - 1} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === history.length - 1 ? 0.5 : 1 }}>↷</button>
           </div>
-          <h2 style={{ margin: 0, letterSpacing: '1px', fontSize: '15px', fontWeight: '700', color: COLORS.textPrimary }}>LinX Massing Engine</h2>
+          <h2 style={{ margin: 0, fontSize: '17px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, textTransform: 'none', whiteSpace: 'nowrap' }}>
+            <span style={{ fontWeight: 700 }}>LinX</span> Massing Engine
+          </h2>
         </div>
 
         <div style={{ display: 'flex', gap: '30px', alignItems: 'center', background: COLORS.bgLight, padding: '5px 15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '9px', color: COLORS.textSecondary, fontWeight: '500' }}>Target User:</label>
-            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Barlow', sans-serif" }}>
+            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Target User:</label>
+            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '14px', textTransform: 'uppercase' }}>
               <option value="Students">Students</option>
               <option value="Young Professional">Young Professional</option>
               <option value="Family">Family</option>
@@ -1295,9 +1297,9 @@ function App() {
             </select>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '9px', color: COLORS.textSecondary, fontWeight: '500' }}>Residents:</label>
-            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px' }} />
-            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500' }}>Auto-Populate</button>
+            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
+            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '14px' }} />
+            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '14px', textTransform: 'uppercase' }}>Auto-Populate</button>
           </div>
         </div>
 
@@ -1311,16 +1313,16 @@ function App() {
           </div>
           {viewMode === '2D' && (
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '9.8px', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Processing...' : 'Randomize'}
               </button>
-              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '9.8px', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Calculating...' : 'Auto-Layout'}
               </button>
-              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9.8px' }}>
+              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
                 + Green Areas
               </button>
-              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9.8px' }}>
+              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
                 Import Boundary
               </button>
               <input type="file" id="boundaryFile" accept=".json" style={{ display: "none" }} onChange={handleFileSelected} />
@@ -1333,27 +1335,27 @@ function App() {
 
         {/* LEFT PANEL */}
         <div style={{ width: '240px', flexShrink: 0, background: COLORS.bgMedium, borderRight: `1px solid ${COLORS.borderMedium}`, padding: '20px', display: 'flex', flexDirection: 'column', zIndex: 10, overflowY: 'auto' }}>
-          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '10px' }}>FLOORS</h3>
+          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '13px' }}>FLOORS</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '15px' }}>
             {floors.map(f => (
               <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? COLORS.bgLight : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '9px' }}>{floorLabel(f)}</button>
-                <button onClick={() => handleDeleteFloor(f)} style={{ padding: '8px 6px', background: '#b86868', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '9px' }}>×</button>
+                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? COLORS.bgLight : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>{floorLabel(f)}</button>
+                <button onClick={() => handleDeleteFloor(f)} style={{ padding: '8px 6px', background: '#b86868', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>×</button>
               </div>
             ))}
           </div>
-          <button onClick={handleAddFloor} style={{ padding: '10px', background: 'transparent', color: COLORS.accent, border: `1px dashed ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', marginBottom: '20px', fontSize: '9px' }}>+ Add Floor</button>
+          <button onClick={handleAddFloor} style={{ padding: '10px', background: 'transparent', color: COLORS.accent, border: `1px dashed ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', marginBottom: '20px', fontSize: '12px' }}>+ Add Floor</button>
 
           {/* DATA ANALYTICS */}
           <div style={{ marginTop: '25px', padding: '15px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.textPrimary, margin: '0 0 15px 0', fontSize: '8.2px', letterSpacing: '1px', fontWeight: '700' }}>DATA ANALYTICS</h4>
+            <h4 style={{ color: COLORS.textPrimary, margin: '0 0 15px 0', fontSize: '11px', letterSpacing: '1px', fontWeight: '700' }}>DATA ANALYTICS</h4>
             {[
               { label: 'Built Area:', value: `${metrics.totalM2} m²`, color: COLORS.textSecondary },
               { label: 'Usable Space:', value: `${metrics.usableM2} m²`, color: COLORS.textPrimary },
               { label: 'Circulation:', value: `${metrics.circM2} m²`, color: '#9a9690' },
               { label: 'Green Area:', value: `${metrics.greenM2} m²`, color: '#7d8a6a' },
             ].map(item => (
-              <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '8.2px' }}>
+              <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '11px' }}>
                 <span style={{ color: item.color }}>{item.label}</span>
                 <span style={{ color: COLORS.textPrimary, fontWeight: '600' }}>{item.value}</span>
               </div>
@@ -1361,16 +1363,16 @@ function App() {
             <div style={{ width: '100%', background: COLORS.borderMedium, height: '8px', borderRadius: '4px', overflow: 'hidden', marginBottom: '5px' }}>
               <div style={{ width: `${metrics.efficiency}%`, background: metrics.efficiency >= 75 ? COLORS.accent : metrics.efficiency >= 60 ? '#9a9690' : '#b0746c', height: '100%', transition: 'width 0.3s' }} />
             </div>
-            <div style={{ textAlign: 'right', fontSize: '7.5px', color: COLORS.textSecondary, marginBottom: '15px' }}>
+            <div style={{ textAlign: 'right', fontSize: '11px', color: COLORS.textSecondary, marginBottom: '15px' }}>
               Efficiency: <span style={{ color: metrics.efficiency >= 75 ? COLORS.accent : COLORS.textSecondary, fontWeight: '600' }}>{metrics.efficiency}%</span>
             </div>
-            <button onClick={handleExportJSON} style={{ width: '100%', padding: '10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '8.2px' }}>Export All Floors JSON</button>
+            <button onClick={handleExportJSON} style={{ width: '100%', padding: '10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '11px' }}>Export All Floors JSON</button>
           </div>
 
           {/* SITE BOUNDARY */}
           <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '7.5px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SITE BOUNDARY</h4>
-            <div style={{ fontSize: '7.5px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
+            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SITE BOUNDARY</h4>
+            <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>SITE:</span> {siteBoundary.name}</div>
               {siteBoundary.metadata?.original_area_m2 && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>AREA:</span> {siteBoundary.metadata.original_area_m2.toFixed(0)} m²</div>}
               <div><span style={{ fontWeight: '600' }}>OFFSET:</span> {alignAngleDeg.toFixed(1)}° True North</div>
@@ -1379,8 +1381,8 @@ function App() {
 
           {/* SHADOW & DAYLIGHT CONTROLS */}
           <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '7.5px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SHADOW & DAYLIGHT (LONDON)</h4>
-            <div style={{ fontSize: '7.5px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
+            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SHADOW & DAYLIGHT (LONDON)</h4>
+            <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
                 <span>Month:</span><span>{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][solarMonth - 1]}</span>
               </div>
@@ -1399,18 +1401,18 @@ function App() {
           {viewMode === 'GRAPH' ? (
             <div id="view-graph" onContextMenu={e => handleRightClickExport(e, 'GRAPH')} style={{ width: '100%', height: '100%', background: COLORS.bgLight, position: 'relative' }}>
               <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-                <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '10px', fontWeight: '600' }}>Topology Graph</h3>
-                <p style={{ margin: '0 0 12px 0', fontSize: '8.2px', color: COLORS.textSecondary }}>Space Syntax node-edge mapping.</p>
-                <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ width: '100%', padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '8.2px', opacity: isCalculating ? 0.6 : 1 }}>
+                <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>Topology Graph</h3>
+                <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: COLORS.textSecondary }}>Space Syntax node-edge mapping.</p>
+                <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ width: '100%', padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '11px', opacity: isCalculating ? 0.6 : 1 }}>
                   {isCalculating ? 'Processing...' : '↻ Refresh Connections'}
                 </button>
               </div>
               <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}`, minWidth: '180px' }}>
-                <h4 style={{ margin: '0 0 10px 0', fontSize: '9px', color: COLORS.textPrimary }}>Node Typologies</h4>
+                <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', color: COLORS.textPrimary }}>Node Typologies</h4>
                 {[['#9a9690','Core / Circulation'],['#6e2424','Residential Unit'],['#6a665f','Private Communal'],['#b0746c','Public Buffer'],['#7d8a6a','Green Area']].map(([color, label]) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                     <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: color }} />
-                    <span style={{ fontSize: '8.2px', color: COLORS.textSecondary }}>{label}</span>
+                    <span style={{ fontSize: '11px', color: COLORS.textSecondary }}>{label}</span>
                   </div>
                 ))}
               </div>
@@ -1456,12 +1458,12 @@ function App() {
             <div id="view-3d" onContextMenu={e => handleRightClickExport(e, '3D')} style={{ width: '100%', height: '100%', background: COLORS.bgLight }}>
               <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10 }}>
                 <div style={{ background: 'rgba(255,255,255,0.8)', padding: '15px', borderRadius: '8px', marginBottom: '15px', border: `1px solid ${COLORS.borderMedium}` }}>
-                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '10px', fontWeight: '600' }}>3D Massing Model</h3>
-                  <p style={{ margin: 0, fontSize: '8.2px', color: COLORS.textSecondary }}>Left Click = Orbit | Right Click = Pan | Scroll = Zoom</p>
+                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>3D Massing Model</h3>
+                  <p style={{ margin: 0, fontSize: '11px', color: COLORS.textSecondary }}>Left Click = Orbit | Right Click = Pan | Scroll = Zoom</p>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
-                  <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9px' }}>Export Massing .OBJ</button>
-                  <button onClick={handleExportWireframeOBJ} style={{ padding: '8px 15px', background: COLORS.textPrimary, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9px' }}>Export Wireframe .OBJ</button>
+                  <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Massing .OBJ</button>
+                  <button onClick={handleExportWireframeOBJ} style={{ padding: '8px 15px', background: COLORS.textPrimary, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Wireframe .OBJ</button>
                 </div>
               </div>
               <Canvas shadows camera={CAMERA_SETTINGS} gl={{ preserveDrawingBuffer: true }}>
@@ -1570,7 +1572,7 @@ function App() {
                                 transform: `scaleX(${room.flipX ? -1 : 1}) rotate(${room.rotation}deg)`,
                                 transformOrigin: '50% 50%'
                             }}>
-                                <span style={{ fontSize: '9px', color: COLORS.textSecondary, fontWeight: '700', textShadow: '1px 1px 0 #fff' }}>
+                                <span style={{ fontSize: '12px', color: COLORS.textSecondary, fontWeight: '700', textShadow: '1px 1px 0 #fff' }}>
                                     {displayName} (Void)
                                 </span>
                             </div>
@@ -1636,12 +1638,12 @@ function App() {
 
                                   {/* Room label */}
                                   <div style={roomLabelContainerStyle}>
-                                    <span style={{ fontSize: '7.5px', fontWeight: '600', textShadow: '1px 1px 2px rgba(0,0,0,0.8)' }}>{displayName}</span>
-                                    <span style={{ fontSize: '6.8px', opacity: 0.9, textShadow: '1px 1px 2px rgba(0,0,0,0.8)', marginTop: '2px' }}>{displayArea}m²</span>
+                                    <span style={{ fontSize: '11px', fontWeight: '400', textShadow: '1px 1px 2px rgba(0,0,0,0.8)' }}>{displayName}</span>
+                                    <span style={{ fontSize: '11px', opacity: 0.9, textShadow: '1px 1px 2px rgba(0,0,0,0.8)', marginTop: '2px' }}>{displayArea}m²</span>
                                     
                                     {/* Daylight Badge */}
                                     {hasScore && (
-                                      <span style={{ fontSize: '6px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
+                                      <span style={{ fontSize: '11px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
                                         Daylight: {Math.round(room.daylight_score * 100)}%
                                       </span>
                                     )}
@@ -1658,15 +1660,15 @@ function App() {
                   <div className="no-export" style={{ position: 'absolute', bottom: '30px', left: '30px', zIndex: 20, pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                     <svg width="40" height="60" viewBox="0 0 40 60" fill="none" style={{ transform: `rotate(${alignAngleDeg}deg)` }}>
                       <path d="M20 0 L40 40 L20 30 L0 40 Z" fill="#b86868" />
-                      <text x="20" y="55" fill="#333333" fontSize="10px" fontWeight="bold" textAnchor="middle" fontFamily="'Barlow', sans-serif">N</text>
+                      <text x="20" y="55" fill="#333333" fontSize="13px" fontWeight="bold" textAnchor="middle" fontFamily="'Jost', sans-serif">N</text>
                     </svg>
                   </div>
 
                   {/* Floor controls */}
-                  <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', color: COLORS.textSecondary, fontWeight: '600', fontSize: '12px', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none' }}>
+                  <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', color: COLORS.textSecondary, fontWeight: '600', fontSize: '16px', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-                      <span style={{ fontSize: '9.8px' }}>{floorLabel(floor).toUpperCase()} {activeFloor === floor && <span style={{ color: COLORS.accent, fontSize: '9px' }}>(Active)</span>}</span>
-                      <span style={{ fontSize: '8.2px', background: COLORS.bgMedium, color: COLORS.textSecondary, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${COLORS.borderMedium}` }}>Residents: {getResidentsForFloor(floor)}</span>
+                      <span style={{ fontSize: '13px' }}>{floorLabel(floor).toUpperCase()} {activeFloor === floor && <span style={{ color: COLORS.accent, fontSize: '12px' }}>(Active)</span>}</span>
+                      <span style={{ fontSize: '11px', background: COLORS.bgMedium, color: COLORS.textSecondary, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${COLORS.borderMedium}` }}>Residents: {getResidentsForFloor(floor)}</span>
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       {[
@@ -1675,13 +1677,13 @@ function App() {
                         { label: 'Clear Floor',action: () => handleResetFloor(floor),      bg: '#b86868',         color: 'white', border: 'none' },
                         { label: 'Export JSON',action: () => handleExportFloorJSON(floor), bg: COLORS.accent,     color: COLORS.bgLight, border: 'none' },
                       ].map(btn => (
-                        <button key={btn.label} onClick={btn.action} style={{ padding: '4px 10px', background: btn.bg, color: btn.color, border: btn.border, borderRadius: '4px', cursor: 'pointer', fontSize: '7.5px', fontWeight: '600', pointerEvents: 'auto' }}>{btn.label}</button>
+                        <button key={btn.label} onClick={btn.action} style={{ padding: '4px 10px', background: btn.bg, color: btn.color, border: btn.border, borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: '600', pointerEvents: 'auto' }}>{btn.label}</button>
                       ))}
                     </div>
                   </div>
 
                   {/* Help overlay */}
-                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '7.5px', fontWeight: '600', zIndex: 10, background: 'rgba(255,255,255,0.8)', padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
+                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600', zIndex: 10, background: 'rgba(255,255,255,0.8)', padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
                     <span style={{ color: COLORS.accent }}>Double-Click:</span> Lock/Pin<br/>
                     <span style={{ color: COLORS.accent }}>Select + Delete:</span> Delete Room<br/>
                     <span style={{ color: COLORS.accent }}>Right-Click (Room):</span> Rotate<br/>
@@ -1691,10 +1693,10 @@ function App() {
 
                   {/* Zoom controls */}
                   <div className="no-export" style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 20, display: 'flex', gap: '8px', background: 'rgba(255,255,255,0.8)', padding: '10px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-                    <button onClick={() => handleZoomStep(false)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9px' }}>Zoom Out</button>
-                    <span style={{ padding: '8px 10px', color: COLORS.textSecondary, fontSize: '8.2px', display: 'flex', alignItems: 'center', fontWeight: '600', minWidth: '45px', justifyContent: 'center' }}>{(canvasZoom * 100).toFixed(0)}%</span>
-                    <button onClick={() => handleZoomStep(true)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '9px' }}>Zoom In</button>
-                    <button onClick={() => { const { zoom, pan } = calculateOptimalZoom(siteBoundary); setCanvasZoom(zoom); setCanvasPan(pan); }} style={{ padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '8.2px', whiteSpace: 'nowrap' }}>Fit Boundary</button>
+                    <button onClick={() => handleZoomStep(false)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Zoom Out</button>
+                    <span style={{ padding: '8px 10px', color: COLORS.textSecondary, fontSize: '11px', display: 'flex', alignItems: 'center', fontWeight: '600', minWidth: '45px', justifyContent: 'center' }}>{(canvasZoom * 100).toFixed(0)}%</span>
+                    <button onClick={() => handleZoomStep(true)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Zoom In</button>
+                    <button onClick={() => { const { zoom, pan } = calculateOptimalZoom(siteBoundary); setCanvasZoom(zoom); setCanvasPan(pan); }} style={{ padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '11px', whiteSpace: 'nowrap' }}>Fit Boundary</button>
                   </div>
                 </div>
               ))}
@@ -1704,15 +1706,15 @@ function App() {
 
         {/* RIGHT PANEL — Component Library */}
         <div style={{ width: '280px', flexShrink: 0, background: COLORS.bgMedium, borderLeft: `1px solid ${COLORS.borderMedium}`, padding: '20px', overflowY: 'auto', zIndex: 10 }}>
-          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '9.8px' }}>Component Library</h3>
+          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '13px' }}>Component Library</h3>
 
           {Object.entries(communalComponents).map(([groupName, items]) => (
             <div key={groupName} style={{ marginBottom: '25px' }}>
-              <div style={{ color: COLORS.textSecondary, fontSize: '7.5px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>{groupName}</div>
+              <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>{groupName}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 {items.map(itemName => (
                   <button key={itemName} onClick={() => handleAddRoom(groupName, itemName)}
-                    style={{ padding: '8px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '8.2px' }}>
+                    style={{ padding: '8px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '11px' }}>
                     + {itemName}
                   </button>
                 ))}
@@ -1721,13 +1723,13 @@ function App() {
           ))}
 
           <div style={{ marginBottom: '25px' }}>
-            <div style={{ color: COLORS.textSecondary, fontSize: '7.5px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>Residential Unit Catalog</div>
+            <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>Residential Unit Catalog</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {residentialComponents.map(itemName => {
                 const isActive = activeCatalogContext === itemName;
                 return (
                   <button key={itemName} onClick={(e) => { setCatalogAnchorTop(e.currentTarget.getBoundingClientRect().top); setActiveCatalogContext(isActive ? null : itemName); }}
-                    style={{ padding: '8px', background: isActive ? COLORS.borderMedium : COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '8.2px', display: 'flex', justifyContent: 'space-between' }}>
+                    style={{ padding: '8px', background: isActive ? COLORS.borderMedium : COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '11px', display: 'flex', justifyContent: 'space-between' }}>
                     <span>Browse {itemName}</span>
                     <span style={{ color: isActive ? COLORS.accent : COLORS.textSecondary, transform: isActive ? 'rotate(180deg)' : 'none' }}>&lt;</span>
                   </button>
@@ -1737,10 +1739,10 @@ function App() {
           </div>
 
           {activeCatalogContext && (
-            <div style={{ position: 'fixed', top: Math.min(catalogAnchorTop, window.innerHeight - 340), right: 296, width: 250, background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '6px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', padding: '14px', zIndex: 50, maxHeight: '70vh', overflowY: 'auto' }}>
+            <div style={{ position: 'fixed', top: Math.max(8, Math.min(catalogAnchorTop, window.innerHeight - (90 + CATALOG_DATA[activeCatalogContext].length * 74))), right: 296, width: 250, background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '6px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', padding: '14px', zIndex: 50, maxHeight: '85vh', overflowY: 'auto' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <div style={{ color: COLORS.accent, fontSize: '8.2px', fontWeight: '600' }}>{activeCatalogContext} Options</div>
-                <span onClick={() => setActiveCatalogContext(null)} style={{ cursor: 'pointer', color: COLORS.textSecondary, fontWeight: '700', fontSize: '12px', lineHeight: '1' }}>×</span>
+                <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600' }}>{activeCatalogContext} Options</div>
+                <span onClick={() => setActiveCatalogContext(null)} style={{ cursor: 'pointer', color: COLORS.textSecondary, fontWeight: '700', fontSize: '16px', lineHeight: '1' }}>×</span>
               </div>
               {CATALOG_DATA[activeCatalogContext].map((opt, i) => (
                 <div key={i} onClick={() => handleAddCatalogRoom("Residential Unit", activeCatalogContext, opt)}
@@ -1751,11 +1753,11 @@ function App() {
                     </svg>
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ color: COLORS.textPrimary, fontSize: '7.5px', fontWeight: '600' }}>{opt.opt}</div>
-                    <div style={{ color: COLORS.textSecondary, fontSize: '6.8px', marginTop: '2px' }}>Area: {opt.area} m²</div>
-                    <div style={{ color: COLORS.accent, fontSize: '6.8px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
+                    <div style={{ color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600' }}>{opt.opt}</div>
+                    <div style={{ color: COLORS.textSecondary, fontSize: '11px', marginTop: '2px' }}>Area: {opt.area} m²</div>
+                    <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
                   </div>
-                  <div style={{ color: COLORS.accent, fontWeight: '600', fontSize: '12px' }}>+</div>
+                  <div style={{ color: COLORS.accent, fontWeight: '600', fontSize: '16px' }}>+</div>
                 </div>
               ))}
             </div>
