@@ -5,23 +5,25 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Edges, Line } from '@react-three/drei';
 import ForceGraph2D from 'react-force-graph-2d';
 import html2canvas from 'html2canvas';
+import UNIT_WALLS from './unitWalls';
 
 // ============================================
 // CONSTANTS & CONFIG
 // ============================================
 const GRID_SIZE = 20;
-const SUBGRID_SIZE = 10;
+const SUBGRID_SIZE = 20; // Exactly 1x1m internal snapping
 const CAMERA_SETTINGS = { position: [0, 80, 80], fov: 40 };
 const PIXELS_PER_METER = 20;
-const FLOOR_TO_FLOOR_HEIGHT = 3.0; 
-
-// London Target Coordinates
+const FLOOR_TO_FLOOR_HEIGHT = 3.0;
+// Green areas / gardens render as a thin 20cm green ground plane (vs. the 3m walls),
+// well under one storey so they never project as a void onto floors added above them.
+const GREEN_AREA_HEIGHT = 0.2;
 const LONDON_LATITUDE = 51.5074 * (Math.PI / 180);
 
 // ============================================
 // PROGRAMME FLOOR HEIGHTS & TYPES
 // ============================================
-const DOUBLE_HEIGHT_ROOMS = ["Lobby", "Library", "Mini Cinema", "Garden"];
+const DOUBLE_HEIGHT_ROOMS = ["Lobby", "Library", "Mini Cinema", "Garden", "3 Bedroom", "4 Bedroom"];
 
 function getRoomIsDoubleHeight(category) {
   const name = (category || '').split(' - ')[1] || category;
@@ -30,11 +32,12 @@ function getRoomIsDoubleHeight(category) {
 
 const PROGRAMME_FLOOR_HEIGHT = {
   "Lobby": 6.0, "Library": 6.0, "Mini Cinema": 6.0, "Garden": 6.0, "Multipurpose Hall": 6.0,
-  "Gym": 4.5, "Events Room": 4.5, "Indoor Play Area": 4.5,
+  "Gym": 3.0, "Events Room": 3.0, "Indoor Play Area": 3.0,
   "Core": 3.0, "Stairs": 3.0, "Corridor": 3.0,
   "Outdoor Playground": 3.0, "Shared Living Room": 3.0, "Shared Kitchen": 3.0,
   "Game Room": 3.0, "Workspace Room": 3.0, "Meeting Room": 3.0, "Concentration Pod": 3.0,
-  "Studio": 3.0, "1 Bedroom": 3.0, "2 Bedroom": 3.0, "3 Bedroom": 3.0, "4 Bedroom": 3.0,
+  "Studio": 3.0, "1 Bedroom": 3.0, "2 Bedroom": 3.0, 
+  "3 Bedroom": 6.0, "4 Bedroom": 6.0,
 };
 const DEFAULT_FLOOR_HEIGHT = 3.0;
 
@@ -60,34 +63,38 @@ function getRoomStructType(category) {
   return PROGRAMME_STRUCT_TYPE[name] || 'C1';
 }
 
-const STRUCT_TYPE_COLOR = {
-  C1: '#aaaaaa', C2A: '#7a9fc2', C2B: '#7ab89f',
-  C3: '#c2a37a', C4: '#c27a7a',
-};
-
-// ============================================
-// COLORS (LIGHT THEME)
-// ============================================
+// Monochrome (greys + white) palette with maroon-red accents for emphasis.
 const COLORS = {
-  bgDark: '#f5f5f5', bgMedium: '#e0e0e0', bgLight: '#ffffff',
-  borderDark: '#cccccc', borderMedium: '#d9d9d9', borderLight: '#ececec',
-  textPrimary: '#333333', textSecondary: '#666666', textTertiary: '#999999',
-  accent: '#0056b3', accentDark: '#004494',
+  bgDark: '#f1f3f5', bgMedium: '#e4e7ea', bgLight: '#ffffff',
+  borderDark: '#b9bfc5', borderMedium: '#d3d8dd', borderLight: '#eaedf0',
+  textPrimary: '#23282d', textSecondary: '#5f676e', textTertiary: '#969da4',
+  accent: '#4f1717', accentDark: '#360f0f',
 };
 
-// ============================================
-// GRAPH HELPERS
-// ============================================
 const getSemanticColor = (category) => {
-  if (!category) return '#cccccc';
+  if (!category) return '#bdbab5';
   const cat = category.toLowerCase();
-  if (cat.includes('core') || cat.includes('lobby')) return '#b3b3b3';
-  if (cat.includes('residential')) return '#7c2b2b';
-  if (cat.includes('public') || cat.includes('buffer')) return '#dfa39c';
-  if (cat.includes('private communal')) return '#5c5c5c';
-  if (cat.includes('corridor')) return '#e0e0e0';
-  return '#cccccc';
+  if (cat.includes('green') || cat.includes('garden') || cat.includes('playground')) return '#7d8a6a';
+  if (cat.includes('core') || cat.includes('lobby')) return '#9a9690';
+  if (cat.includes('residential')) return '#6e2424';
+  if (cat.includes('public') || cat.includes('buffer')) return '#b0746c';
+  if (cat.includes('private communal')) return '#6a665f';
+  if (cat.includes('corridor')) return '#cfccc6';
+  return '#bdbab5';
 };
+
+// Floor display label: first floor is the Ground Floor, then Floor 1, 2, 3...
+const floorLabel = (n) => (n === 1 ? 'Ground Floor' : `Floor ${n - 1}`);
+
+// Ray-casting point-in-polygon test (polygon = array of [x, y] in pixels).
+function pointInPolygon(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
 
 const getShortNodeName = (category, floor) => {
   const name = category.split(' - ')[1] || category;
@@ -95,8 +102,66 @@ const getShortNodeName = (category, floor) => {
 };
 
 // ============================================
-// HELPERS
+// BOUNDARY ORTHOGONAL ALIGNMENT
 // ============================================
+const alignPolygonToOrthogonal = (polygon) => {
+  if (!polygon || polygon.length === 0) return { rotatedPoly: [], angle: 0, cx: 0, cy: 0, minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  
+  let maxLength = 0;
+  let angle = 0;
+  
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    
+    if (length > maxLength) {
+      maxLength = length;
+      angle = Math.atan2(dy, dx);
+    }
+  }
+  
+  if (angle > Math.PI / 2) angle -= Math.PI;
+  if (angle < -Math.PI / 2) angle += Math.PI;
+
+  const cx = polygon.reduce((sum, p) => sum + p[0], 0) / polygon.length;
+  const cy = polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length;
+
+  const rotatedPoly = polygon.map(p => {
+    const dx = p[0] - cx;
+    const dy = p[1] - cy;
+    const rx = Math.cos(-angle) * dx - Math.sin(-angle) * dy + cx;
+    const ry = Math.sin(-angle) * dx + Math.cos(-angle) * dy + cy;
+    return [rx, ry];
+  });
+
+  const minX = Math.min(...rotatedPoly.map(p => p[0]));
+  const maxX = Math.max(...rotatedPoly.map(p => p[0]));
+  const minY = Math.min(...rotatedPoly.map(p => p[1]));
+  const maxY = Math.max(...rotatedPoly.map(p => p[1]));
+
+  return { rotatedPoly, angle, cx, cy, minX, maxX, minY, maxY };
+};
+
+const processBoundary = (baseBoundary) => {
+  const poly = baseBoundary.metadata.polygon_pixels || [];
+  const aligned = alignPolygonToOrthogonal(poly);
+  return {
+    ...baseBoundary,
+    minX: aligned.minX, maxX: aligned.maxX,
+    minY: aligned.minY, maxY: aligned.maxY,
+    metadata: {
+       ...baseBoundary.metadata,
+       original_polygon_pixels: poly,
+       polygon_pixels: aligned.rotatedPoly,
+       alignment_angle: aligned.angle,
+       alignment_centroid: [aligned.cx, aligned.cy]
+    }
+  };
+};
+
 const calculateOptimalZoom = (boundary) => {
   if (!boundary) return { zoom: 1, pan: { x: 0, y: 0 } };
   const canvas = document.getElementById('canvas-container');
@@ -120,7 +185,6 @@ function pixelsToMeters(pixels) {
   return (pixels / PIXELS_PER_METER).toFixed(2);
 }
 
-// SOLAR MATH CALCULATOR FOR LONDON
 function getLondonSolarPosition(month, hour) {
   const dayOfYear = (month - 1) * 30 + 15;
   const declination = 23.45 * Math.sin((360 / 365) * (dayOfYear - 81) * (Math.PI / 180)) * (Math.PI / 180);
@@ -142,28 +206,43 @@ function getLondonSolarPosition(month, hour) {
 }
 
 // ============================================
-// CATALOG DATA
+// CATALOG DATA (Precise 1x1m Mapping)
 // ============================================
+// Footprints traced from the uploaded unit plans. All grids are integer
+// metres (1 cell = 1m), so gw*gh (minus notches) equals area in m².
 const CATALOG_DATA = {
+  // Residential shapePaths are the rectangular footprint of each unit's wall shell
+  // (from rooms_massing.json) so the 2D plan matches the 3D wall panels and rotates
+  // identically. True concave outlines aren't recoverable from the export (door gaps).
   "Studio": [
-    { opt: "Option 10/10", area: 39, score: 0.97, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 6.5, gh: 6 },
-    { opt: "Option 9/10",  area: 39, score: 0.97, path: "20,30 20,0 100,0 100,100 0,100 0,30", variant: 1, gw: 7.5, gh: 6 },
+    // Studio_A (rooms_massing): 10x4, 40m²
+    { opt: "Layout A", area: 40, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 4 },
+    // Studio_B (rooms_massing): 6x8, 48m²
+    { opt: "Layout B", area: 48, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 6, gh: 8 },
   ],
   "1 Bedroom": [
-    { opt: "Option 10/10", area: 51, score: 0.94, path: "0,0 50,0 50,20 75,20 75,40 100,40 100,100 0,100", variant: 0, gw: 8.5, gh: 6 },
-    { opt: "Option 8/10",  area: 51, score: 0.94, path: "0,0 60,0 60,40 100,40 100,100 0,100", variant: 1, gw: 9, gh: 6 },
+    // 1Bed_A (rooms_massing): 10x6, 60m²
+    { opt: "Layout A", area: 60, score: 0.94, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 6 },
+    // 1Bed_B (rooms_massing): 8x7, 56m²
+    { opt: "Layout B", area: 56, score: 0.92, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 8, gh: 7 },
   ],
   "2 Bedroom": [
-    { opt: "Option 5/10",  area: 60, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 6 },
-    { opt: "Option 10/10", area: 60, score: 0.95, path: "0,0 70,0 70,40 100,40 100,100 0,100", variant: 1, gw: 10, gh: 6 },
+    // 2Bed_A (rooms_massing): 11x6, 66m²
+    { opt: "Layout A", area: 66, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 11, gh: 6 },
+    // 2Bed_B (rooms_massing): 10x6, 60m²
+    { opt: "Layout B", area: 60, score: 0.93, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 10, gh: 6 },
   ],
   "3 Bedroom": [
-    { opt: "Option 9/10",  area: 75, score: 0.96, path: "30,30 30,0 100,0 100,100 0,100 0,30", variant: 1, gw: 10, gh: 7.5 },
-    { opt: "Option 4/10",  area: 75, score: 0.94, path: "0,0 70,0 70,40 100,40 100,100 0,100", variant: 2, gw: 10, gh: 7.5 },
+    // 3Bed_A (rooms_massing): 9x6, 54m², double-height (6m); rectangle
+    { opt: "Layout A", area: 54, score: 0.96, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 9, gh: 6 },
+    // 3Bed_B (rooms_massing): 11x5, 55m², double-height (6m); rectangle
+    { opt: "Layout B", area: 55, score: 0.89, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 11, gh: 5 },
   ],
   "4 Bedroom": [
-    { opt: "Option 9/10",  area: 90, score: 1.00, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 9 },
-    { opt: "Option 8/10",  area: 90, score: 0.98, path: "0,0 70,0 70,50 100,50 100,100 0,100", variant: 1, gw: 10, gh: 9 },
+    // 4Bed_A (rooms_massing): 11x7, 77m², double-height (6m); rectangle
+    { opt: "Layout A", area: 77, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 11, gh: 7 },
+    // 4Bed_B (rooms_massing): 9x7, 63m², double-height (6m); rectangle
+    { opt: "Layout B", area: 63, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 9, gh: 7 },
   ],
 };
 
@@ -199,7 +278,6 @@ const residentialComponents = ["Studio", "1 Bedroom", "2 Bedroom", "3 Bedroom", 
 // ============================================
 // 3D COMPONENTS
 // ============================================
-
 const SceneCapturer = ({ sceneRef }) => {
   const { scene } = useThree();
   useEffect(() => { sceneRef.current = scene; }, [scene, sceneRef]);
@@ -209,8 +287,8 @@ const SceneCapturer = ({ sceneRef }) => {
 const Boundary3D = ({ boundary, scale }) => {
   const poly = boundary?.metadata?.polygon_pixels;
   if (!poly || poly.length === 0) return null;
-  const cx = (boundary.minX + boundary.maxX) / 2 || 400;
-  const cy = (boundary.minY + boundary.maxY) / 2 || 300;
+  const cx = boundary.metadata.alignment_centroid[0];
+  const cy = boundary.metadata.alignment_centroid[1];
   return (
     <group>
       {poly.map((point, i) => {
@@ -229,6 +307,99 @@ const Boundary3D = ({ boundary, scale }) => {
   );
 };
 
+// Map a residential category + shape variant to a rooms_massing unit key (e.g. "3Bed_B").
+const UNIT_WALL_ABBR = {
+  "Studio": "Studio", "1 Bedroom": "1Bed", "2 Bedroom": "2Bed",
+  "3 Bedroom": "3Bed", "4 Bedroom": "4Bed",
+};
+function getUnitWallKey(category, variant) {
+  const name = (category || '').split(' - ')[1];
+  const ab = UNIT_WALL_ABBR[name];
+  if (!ab) return null;
+  return `${ab}_${variant === 1 ? 'B' : 'A'}`;
+}
+
+const WALL_THICKNESS = 0.12; // m — visual thickness of a 1m panel
+
+// Renders a residential unit as panelised 1m wall segments (hollow shell + interior
+// partitions) using the data exported in unitWalls.js, instead of a solid block.
+const WallPanels = ({ unit, w, d, flipX, color, shapePath }) => {
+  const FLOOR_T = 0.12; // thin floor slab thickness (m)
+  const isDoubleHeight = (unit.size?.[2] || 3) >= 6;
+  // Floor plate follows the unit's footprint outline (shapePath), not a full bbox box.
+  const floorShape = useMemo(() => {
+    const path = shapePath || '0,0 100,0 100,100 0,100';
+    const pts = path.trim().split(' ').map(p => {
+      const [px, py] = p.split(',');
+      let lx = (parseFloat(px) / 100 - 0.5) * w;
+      const ly = -(parseFloat(py) / 100 - 0.5) * d;
+      if (flipX) lx = -lx;
+      return new THREE.Vector2(lx, ly);
+    });
+    return new THREE.Shape(pts);
+  }, [shapePath, w, d, flipX]);
+  const floorMat = <meshStandardMaterial color="#c9c4bc" roughness={0.9} />;
+  return (
+    <group>
+      {/* thin floor plate shaped to the outline (and a mezzanine plate for double-height) */}
+      <mesh position={[0, 0, 0]} receiveShadow>
+        <extrudeGeometry args={[floorShape, { depth: FLOOR_T, bevelEnabled: false }]} />
+        {floorMat}
+      </mesh>
+      {isDoubleHeight && (
+        <mesh position={[0, 0, 3]} receiveShadow>
+          <extrudeGeometry args={[floorShape, { depth: FLOOR_T, bevelEnabled: false }]} />
+          <meshStandardMaterial color="#c9c4bc" roughness={0.9} />
+        </mesh>
+      )}
+      {unit.walls.map((p, i) => {
+        const [sx, sy, sz] = p.s;
+        const [gx, gy, gz] = p.o;
+        const dx = Math.max(sx, WALL_THICKNESS);
+        const dy = Math.max(sy, WALL_THICKNESS);
+        const dz = Math.max(sz, WALL_THICKNESS);
+        // unit-local grid -> mesh-local frame (matches the solid extrude convention)
+        let cxl = (gx + sx / 2) - w / 2;
+        const cyl = d / 2 - (gy + sy / 2);
+        const czl = gz + sz / 2;
+        if (flipX) cxl = -cxl;
+        return (
+          <mesh key={i} position={[cxl, cyl, czl]} castShadow receiveShadow>
+            <boxGeometry args={[dx, dy, dz]} />
+            <meshStandardMaterial color={color} transparent opacity={0.85} roughness={0.4} />
+            <Edges scale={1} threshold={15} color="white" />
+          </mesh>
+        );
+      })}
+    </group>
+  );
+};
+
+// 2D plan overlay: draws a residential unit's 1m wall segments inside its room box so the
+// floor plan shows the same partition layout as the 3D shell. Shares the polygon's
+// flip/rotate transform so it stays aligned under rotation.
+const WallPlan2D = ({ room }) => {
+  if (!(room.category || '').startsWith('Residential Unit')) return null;
+  const key = getUnitWallKey(room.category, room.shapeVariant);
+  const unit = key ? UNIT_WALLS[key] : null;
+  if (!unit) return null;
+  const [w, d] = unit.size;
+  return (
+    <g style={{ transformOrigin: '50% 50%', transform: `scaleX(${room.flipX ? -1 : 1}) rotate(${room.rotation}deg)` }}>
+      {unit.walls.filter(p => p.s[2] >= 2).map((p, i) => {
+        const [sx, sy] = p.s;
+        const [gx, gy] = p.o;
+        const x1 = (gx / w) * 100, y1 = (gy / d) * 100;
+        const x2 = ((gx + sx) / w) * 100, y2 = ((gy + sy) / d) * 100;
+        if (sx > 0 && sy > 0) {
+          return <rect key={i} x={x1} y={y1} width={x2 - x1} height={y2 - y1} fill={room.borderColor} opacity={0.55} />;
+        }
+        return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={room.borderColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />;
+      })}
+    </g>
+  );
+};
+
 const ModularMesh = ({ room, scale, boundary }) => {
   const isRotated = room.rotation % 180 !== 0;
   const unrotatedWidth  = isRotated ? room.height : room.width;
@@ -238,13 +409,18 @@ const ModularMesh = ({ room, scale, boundary }) => {
   const d = unrotatedHeight / scale;
   const h = room.floor_height || getRoomFloorHeight(room.category);
 
-  const cx = (boundary?.minX + boundary?.maxX) / 2 || 400;
-  const cy = (boundary?.minY + boundary?.maxY) / 2 || 300;
+  const cx = boundary?.metadata?.alignment_centroid?.[0] || 400;
+  const cy = boundary?.metadata?.alignment_centroid?.[1] || 300;
 
   const x = (room.x + room.width  / 2 - cx) / scale;
   const z = (room.y + room.height / 2 - cy) / scale;
-  
+
   const y = (room.floor - 1) * FLOOR_TO_FLOOR_HEIGHT;
+
+  // Residential units with exported wall data render as panelised shells.
+  const isResidential = (room.category || '').startsWith('Residential Unit');
+  const wallKey = isResidential ? getUnitWallKey(room.category, room.shapeVariant) : null;
+  const unitWalls = wallKey ? UNIT_WALLS[wallKey] : null;
 
   const shape = useMemo(() => {
     const path = room.shapePath || "0,0 100,0 100,100 0,100";
@@ -259,6 +435,19 @@ const ModularMesh = ({ room, scale, boundary }) => {
   }, [room.shapePath, w, d, room.flipX]);
 
   const geomKey = `${room.id}-${room.shapeVariant}-${room.rotation}-${room.flipX}-${room.width}-${room.height}-${h}`;
+
+  // Residential units with exported wall data render as panelised shells.
+  if (unitWalls) {
+    return (
+      <group
+        position={[x, y, z]}
+        rotation={[-Math.PI / 2, 0, -(room.rotation * Math.PI) / 180]}
+        name={room.category}
+      >
+        <WallPanels unit={unitWalls} w={w} d={d} flipX={room.flipX} color={room.borderColor} shapePath={room.shapePath} />
+      </group>
+    );
+  }
 
   return (
     <mesh
@@ -297,7 +486,7 @@ const getCalculatedRoomAreaM2 = (roomWidth, roomHeight, roomName, communalGwGh, 
 function App() {
   useEffect(() => {
     const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600;700&display=swap';
+    link.href = 'https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600;700&display=swap';
     link.rel = 'stylesheet';
     document.head.appendChild(link);
   }, []);
@@ -307,6 +496,7 @@ function App() {
   const [floors,              setFloors]              = useState([1]);
   const [activeFloor,         setActiveFloor]         = useState(1);
   const [activeCatalogContext,setActiveCatalogContext] = useState(null);
+  const [catalogAnchorTop,    setCatalogAnchorTop]    = useState(120);
   const [history,             setHistory]             = useState([[]]);
   const [historyStep,         setHistoryStep]         = useState(0);
   const [targetUser,          setTargetUser]          = useState('Mix');
@@ -316,15 +506,13 @@ function App() {
   const [selectedRoomId,      setSelectedRoomId]      = useState(null);
   const [exportMenu,          setExportMenu]          = useState({ visible: false, x: 0, y: 0, imageData: null, fileName: '' });
 
-  // Solar state
   const [solarMonth, setSolarMonth] = useState(6); 
   const [solarHour, setSolarHour] = useState(14);  
 
-  const [siteBoundary, setSiteBoundary] = useState({
+  const [siteBoundary, setSiteBoundary] = useState(() => processBoundary({
     type: "Polygon",
-    minX: 150, maxX: 939, minY: 150, maxY: 1232,
     name: "Imported Boundary JSON",
-    gridSize: 15,
+    gridSize: 20,
     metadata: {
       original_area_m2: 1499,
       grid_cell_size_m: 2,
@@ -334,7 +522,7 @@ function App() {
         [863, 914],[847, 959],[848, 1012]
       ]
     }
-  });
+  }));
 
   const [canvasZoom,       setCanvasZoom]       = useState(1);
   const [canvasPan,        setCanvasPan]        = useState({ x: 0, y: 0 });
@@ -539,16 +727,20 @@ function App() {
     }
 
     const colorMap = {
-      'Residential Unit':  { bg: 'rgba(77, 163, 255, 0.4)', border: '#4da3ff' },
-      'Circulation':       { bg: 'rgba(109, 179, 136, 0.4)', border: '#6db388' },
-      'Private Communal':  { bg: 'rgba(184, 154, 109, 0.4)', border: '#b89a6d' },
-      'Public Buffer Zone':{ bg: 'rgba(184, 104, 104, 0.4)', border: '#b86868' }
+      'Residential Unit':  { bg: 'rgba(110, 36, 36, 0.38)',  border: '#6e2424' },
+      'Circulation':       { bg: 'rgba(154, 150, 144, 0.30)', border: '#9a9690' },
+      'Private Communal':  { bg: 'rgba(106, 102, 95, 0.30)',  border: '#6a665f' },
+      'Public Buffer Zone':{ bg: 'rgba(176, 116, 108, 0.32)', border: '#b0746c' },
+      'Green Area':        { bg: 'rgba(125, 138, 106, 0.35)', border: '#7d8a6a' }
     };
     const category = isResidential ? 'Residential Unit' : communalType;
-    const { bg, border } = colorMap[category] || { bg: 'rgba(100,100,100,0.4)', border: '#999' };
+    // Garden & Outdoor Playground are outdoor green spaces: render green + flat, like green areas.
+    const isGreenSpace = itemName === 'Garden' || itemName === 'Outdoor Playground';
+    let { bg, border } = colorMap[category] || { bg: 'rgba(120,116,110,0.3)', border: '#8a857e' };
+    if (isGreenSpace) { bg = colorMap['Green Area'].bg; border = colorMap['Green Area'].border; }
 
-    const cx = (siteBoundary.minX + siteBoundary.maxX) / 2 || 400;
-    const cy = (siteBoundary.minY + siteBoundary.maxY) / 2 || 300;
+    const cx = siteBoundary?.metadata?.alignment_centroid?.[0] || 400;
+    const cy = siteBoundary?.metadata?.alignment_centroid?.[1] || 300;
 
     return {
       id:               `${itemName} (${Math.floor(Math.random() * 10000)})`,
@@ -568,7 +760,7 @@ function App() {
       rotation:         0,
       flipX:            false,
       pinned:           false,
-      floor_height:     getRoomFloorHeight(fullCategory),
+      floor_height:     isGreenSpace ? GREEN_AREA_HEIGHT : getRoomFloorHeight(fullCategory),
       struct_type:      getRoomStructType(fullCategory)
     };
   };
@@ -591,6 +783,12 @@ function App() {
     let spawnIdx = rooms.length;
     const addRoom = (cat, item, custom = null) => { newRooms.push(createRoomObject(cat, item, custom, spawnIdx)); spawnIdx++; };
     const getRandomVariant = (name) => CATALOG_DATA[name][Math.floor(Math.random() * CATALOG_DATA[name].length)];
+
+    // The Library is a double-height unit that spans 2 floors, so one library serves a
+    // stacked pair of floors. Only add one if the floor directly below doesn't already
+    // have a library projecting up into this floor.
+    const libraryBelow = rooms.some(r => r.floor === activeFloor - 1 && (r.category || '').includes('Library'));
+    const addLibraryOnce = () => { if (!libraryBelow) addRoom("Private Communal", "Library"); };
 
     if (activeFloor === 1) addRoom("Circulation", "Lobby");
 
@@ -638,14 +836,62 @@ function App() {
 
     if (targetUser === 'Students') {
       addRoom("Private Communal", "Shared Kitchen"); addRoom("Private Communal", "Shared Living Room");
-      addRoom("Private Communal", "Library"); 
+      addLibraryOnce();
     } else if (targetUser === 'Young Professional') {
-      addRoom("Private Communal", "Library"); addRoom("Private Communal", "Concentration Pod"); addRoom("Private Communal", "Meeting Room");
+      addLibraryOnce(); addRoom("Private Communal", "Concentration Pod"); addRoom("Private Communal", "Meeting Room");
     } else if (targetUser === 'Family') {
       addRoom("Private Communal", "Game Room"); addRoom("Private Communal", "Workspace Room");
     }
 
     updateRoomsWithHistory([...rooms, ...newRooms]);
+  };
+
+  // Fill leftover ground-floor space (inside the site boundary, not covered by any room)
+  // with low green-area tiles. Scans a 2m grid and merges free cells into horizontal strips.
+  const handleFillGreen = () => {
+    const GF = 1;
+    const cell = GRID_SIZE * 2; // 2m
+    const poly = siteBoundary?.metadata?.polygon_pixels;
+    const minX = Math.ceil(siteBoundary.minX), maxX = Math.floor(siteBoundary.maxX);
+    const minY = Math.ceil(siteBoundary.minY), maxY = Math.floor(siteBoundary.maxY);
+    const occ = rooms
+      .filter(r => r.floor === GF && !(r.category || '').includes('Green'))
+      .map(r => [r.x, r.y, r.width, r.height]);
+
+    const inBounds = (x, y) => (poly && poly.length ? pointInPolygon(x, y, poly) : (x >= minX && y >= minY && x <= maxX && y <= maxY));
+    const isFree = (x, y, w, h) => {
+      const pts = [[x, y], [x + w, y], [x, y + h], [x + w, y + h], [x + w / 2, y + h / 2]];
+      if (!pts.every(([px, py]) => inBounds(px, py))) return false;
+      return !occ.some(([ox, oy, ow, oh]) => !(x + w <= ox || ox + ow <= x || y + h <= oy || oy + oh <= y));
+    };
+    const makeGreen = (x, y, w, h) => ({
+      id: `Green Area (${Math.floor(Math.random() * 100000)})`,
+      category: 'Green Area - Garden', floor: GF, x, y, width: w, height: h,
+      bgColor: 'rgba(125, 138, 106, 0.35)', borderColor: '#7d8a6a',
+      shapePath: '0,0 100,0 100,100 0,100', shapeVariant: 0, optName: null, score: null,
+      area: Math.round((w / GRID_SIZE) * (h / GRID_SIZE)),
+      rotation: 0, flipX: false, pinned: true, floor_height: GREEN_AREA_HEIGHT, struct_type: 'C2B',
+    });
+
+    const greens = [];
+    for (let y = minY; y + cell <= maxY; y += cell) {
+      let runStart = null;
+      for (let x = minX; x + cell <= maxX; x += cell) {
+        const free = isFree(x, y, cell, cell);
+        if (free && runStart === null) runStart = x;
+        if (!free && runStart !== null) {
+          if (x - runStart >= cell) greens.push(makeGreen(runStart, y, x - runStart, cell));
+          runStart = null;
+        }
+      }
+      if (runStart !== null) {
+        const end = minX + Math.floor((maxX - minX) / cell) * cell;
+        if (end - runStart >= cell) greens.push(makeGreen(runStart, y, end - runStart, cell));
+      }
+    }
+    if (greens.length === 0) { alert("No leftover ground-floor space to fill."); return; }
+    const without = rooms.filter(r => !((r.category || '').includes('Green') && r.floor === GF));
+    updateRoomsWithHistory([...without, ...greens]);
   };
 
   const handleStraighten = async (shouldRandomize = false) => {
@@ -682,8 +928,9 @@ function App() {
       const response = await fetch('http://127.0.0.1:8000/api/parse-void-boundary', { method: 'POST', body: formData });
       const data = await response.json();
       if (data.status === 'success') {
-        setSiteBoundary(data.boundary);
-        const { zoom, pan } = calculateOptimalZoom(data.boundary);
+        const processed = processBoundary(data.boundary);
+        setSiteBoundary(processed);
+        const { zoom, pan } = calculateOptimalZoom(processed);
         setCanvasZoom(zoom); setCanvasPan(pan);
       } else {
         alert(`Error: ${data.message}`);
@@ -749,37 +996,57 @@ function App() {
   };
 
   const metrics = useMemo(() => {
-    let circPx = 0, usablePx = 0;
+    let circPx = 0, usablePx = 0, greenPx = 0;
     rooms.forEach(room => {
       let area = room.area;
       if (!area) area = getCalculatedRoomAreaM2(room.width, room.height, room.id.split(' (')[0], COMMUNAL_GW_GH, GRID_SIZE);
       const low = (room.category || "").toLowerCase();
+      const isGreen = low.includes('green') || low.includes('garden') || low.includes('playground');
       const isCirc = low.includes('circulation') || low.includes('corridor') || room.id.includes('Corridor');
-      if (isCirc) circPx += area; else usablePx += area;
+      if (isGreen) greenPx += area;
+      else if (isCirc) circPx += area;
+      else usablePx += area;
     });
-    const totalM2 = circPx + usablePx;
+    const builtM2 = circPx + usablePx; // built (enclosed) floor area, excludes outdoor green
     return {
-      circM2: Math.round(circPx), usableM2: Math.round(usablePx), totalM2: Math.round(totalM2),
-      efficiency: totalM2 === 0 ? 0 : Math.round((usablePx / totalM2) * 100)
+      circM2: Math.round(circPx), usableM2: Math.round(usablePx), greenM2: Math.round(greenPx),
+      totalM2: Math.round(builtM2),
+      efficiency: builtM2 === 0 ? 0 : Math.round((usablePx / builtM2) * 100)
     };
   }, [rooms]);
 
-  const buildFloorExportData = (floorNum) => ({
-    floor: floorNum,
-    residents: getResidentsForFloor(floorNum),
-    rooms: rooms.filter(r => r.floor === floorNum).map(r => ({
-      id: r.id, category: r.category, floor: r.floor,
-      rotation: r.rotation, flipX: r.flipX,
-      shapeVariant: r.shapeVariant, shapePath: r.shapePath,
-      optName: r.optName || null, score: r.score || null,
-      area_m2: r.area, width_px: r.width, height_px: r.height,
-      coordinates: { x: r.x, y: r.y },
-      floor_height_m: r.floor_height || getRoomFloorHeight(r.category),
-      struct_type:    r.struct_type  || getRoomStructType(r.category),
-      is_double_height: (r.floor_height || getRoomFloorHeight(r.category)) > FLOOR_TO_FLOOR_HEIGHT,
-      daylight_score: r.daylight_score || null
-    }))
-  });
+  const buildFloorExportData = (floorNum) => {
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const cx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const cy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
+
+    return {
+      floor: floorNum,
+      residents: getResidentsForFloor(floorNum),
+      rooms: rooms.filter(r => r.floor === floorNum).map(r => {
+        const roomCx = r.x + r.width / 2;
+        const roomCy = r.y + r.height / 2;
+        const trueCx = Math.cos(alignAngle) * (roomCx - cx) - Math.sin(alignAngle) * (roomCy - cy) + cx;
+        const trueCy = Math.sin(alignAngle) * (roomCx - cx) + Math.cos(alignAngle) * (roomCy - cy) + cy;
+        
+        return {
+          id: r.id, category: r.category, floor: r.floor,
+          local_rotation: r.rotation, 
+          true_rotation: r.rotation + (alignAngle * 180 / Math.PI),
+          flipX: r.flipX,
+          shapeVariant: r.shapeVariant, shapePath: r.shapePath,
+          optName: r.optName || null, score: r.score || null,
+          area_m2: r.area, width_px: r.width, height_px: r.height,
+          local_coordinates: { x: r.x, y: r.y },
+          true_centroid: { x: trueCx, y: trueCy },
+          floor_height_m: r.floor_height || getRoomFloorHeight(r.category),
+          struct_type:    r.struct_type  || getRoomStructType(r.category),
+          is_double_height: (r.floor_height || getRoomFloorHeight(r.category)) > FLOOR_TO_FLOOR_HEIGHT,
+          daylight_score: r.daylight_score || null
+        }
+      })
+    };
+  };
 
   const triggerJSONDownload = (data, filename) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -815,8 +1082,9 @@ function App() {
       'Public Buffer Zone': 'mat_public_buffer',
     };
 
-    const pxCx  = (siteBoundary.minX + siteBoundary.maxX) / 2;
-    const pxCy  = (siteBoundary.minY + siteBoundary.maxY) / 2;
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const pxCx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const pxCy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
     const pxToM = (px) => px / PIXELS_PER_METER;
 
     let mtl = '# LinX Massing Export — Material Library\n';
@@ -829,9 +1097,6 @@ function App() {
     let vertOffset = 1;
 
     rooms.forEach((room, idx) => {
-      const cx_m = pxToM(room.x + room.width / 2  - pxCx);
-      const cy_m = -pxToM(room.y + room.height / 2 - pxCy);
-
       const isRotated = room.rotation % 180 !== 0;
       const w_m = pxToM(isRotated ? room.height : room.width);
       const d_m = pxToM(isRotated ? room.width  : room.height);
@@ -844,7 +1109,8 @@ function App() {
       const localVerts2D = pathStr.trim().split(' ').map(p => {
         const [px, py] = p.split(',').map(parseFloat);
         let lx = (px / 100 - 0.5) * w_m;
-        let ly = -(py / 100 - 0.5) * d_m;
+        // y-down to match room placement (roomPxCy) so shapes aren't individually mirrored
+        let ly = (py / 100 - 0.5) * d_m;
         if (room.flipX) lx = -lx;
         return [lx, ly];
       });
@@ -853,9 +1119,23 @@ function App() {
       const cosR = Math.cos(rad), sinR = Math.sin(rad);
       const rotVerts = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
 
-      const bottomVerts = rotVerts.map(([lx, ly]) => [cx_m + lx, floorBase, cy_m + ly]);
-      const topVerts    = rotVerts.map(([lx, ly]) => [cx_m + lx, floorTop,  cy_m + ly]);
-      const n = rotVerts.length;
+      const roomPxCx = room.x + room.width / 2;
+      const roomPxCy = room.y + room.height / 2;
+
+      const trueVerts = rotVerts.map(([lx, ly]) => {
+          const centerDistX_m = (roomPxCx - pxCx) / PIXELS_PER_METER;
+          const centerDistY_m = (roomPxCy - pxCy) / PIXELS_PER_METER;
+          const localMx = centerDistX_m + lx;
+          const localMy = centerDistY_m + ly;
+          const trueMx = Math.cos(alignAngle) * localMx - Math.sin(alignAngle) * localMy;
+          const trueMy = Math.sin(alignAngle) * localMx + Math.cos(alignAngle) * localMy;
+          // proper rotation (no reflection) so the OBJ matches the 2D/3D view orientation
+          return [trueMx, trueMy];
+      });
+
+      const bottomVerts = trueVerts.map(([tx, tz]) => [tx, floorBase, tz]);
+      const topVerts    = trueVerts.map(([tx, tz]) => [tx, floorTop,  tz]);
+      const n = trueVerts.length;
 
       const catKey  = Object.keys(MAT_NAMES).find(k => room.category.startsWith(k)) || 'Residential Unit';
       const safeName = room.id.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -887,16 +1167,15 @@ function App() {
 
   const handleExportWireframeOBJ = () => {
     if (rooms.length === 0) return alert("No rooms to export.");
-    const pxCx = (siteBoundary.minX + siteBoundary.maxX) / 2;
-    const pxCy = (siteBoundary.minY + siteBoundary.maxY) / 2;
+    const alignAngle = siteBoundary.metadata.alignment_angle || 0;
+    const pxCx = siteBoundary.metadata.alignment_centroid?.[0] || 0;
+    const pxCy = siteBoundary.metadata.alignment_centroid?.[1] || 0;
     const pxToM = (px) => px / PIXELS_PER_METER;
 
     let obj = '# LinX Structural Wireframe — Meters\n\n';
     let vertOffset = 1;
 
     rooms.forEach((room, idx) => {
-      const cx_m = pxToM(room.x + room.width / 2  - pxCx);
-      const cy_m = -pxToM(room.y + room.height / 2 - pxCy);
       const isRotated = room.rotation % 180 !== 0;
       const w_m = pxToM(isRotated ? room.height : room.width);
       const d_m = pxToM(isRotated ? room.width  : room.height);
@@ -908,16 +1187,33 @@ function App() {
       const localVerts2D = pathStr.trim().split(' ').map(p => {
         const [px, py] = p.split(',').map(parseFloat);
         let lx = (px / 100 - 0.5) * w_m;
-        let ly = -(py / 100 - 0.5) * d_m;
+        // y-down to match room placement (roomPxCy) so shapes aren't individually mirrored
+        let ly = (py / 100 - 0.5) * d_m;
         if (room.flipX) lx = -lx;
         return [lx, ly];
       });
+      
       const rad = (room.rotation * Math.PI) / 180;
       const cosR = Math.cos(rad), sinR = Math.sin(rad);
-      const rotVerts   = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
-      const bottomVerts = rotVerts.map(([lx, ly]) => [cx_m + lx, floorBase, cy_m + ly]);
-      const topVerts    = rotVerts.map(([lx, ly]) => [cx_m + lx, floorTop,  cy_m + ly]);
-      const n = rotVerts.length;
+      const rotVerts = localVerts2D.map(([lx, ly]) => [lx * cosR - ly * sinR, lx * sinR + ly * cosR]);
+      
+      const roomPxCx = room.x + room.width / 2;
+      const roomPxCy = room.y + room.height / 2;
+
+      const trueVerts = rotVerts.map(([lx, ly]) => {
+          const centerDistX_m = (roomPxCx - pxCx) / PIXELS_PER_METER;
+          const centerDistY_m = (roomPxCy - pxCy) / PIXELS_PER_METER;
+          const localMx = centerDistX_m + lx;
+          const localMy = centerDistY_m + ly;
+          const trueMx = Math.cos(alignAngle) * localMx - Math.sin(alignAngle) * localMy;
+          const trueMy = Math.sin(alignAngle) * localMx + Math.cos(alignAngle) * localMy;
+          // proper rotation (no reflection) so the OBJ matches the 2D/3D view orientation
+          return [trueMx, trueMy];
+      });
+
+      const bottomVerts = trueVerts.map(([tx, tz]) => [tx, floorBase, tz]);
+      const topVerts    = trueVerts.map(([tx, tz]) => [tx, floorTop,  tz]);
+      const n = trueVerts.length;
 
       obj += `\no wireframe_${idx}_${room.id.replace(/[^a-zA-Z0-9_]/g, '_')}\n`;
       [...bottomVerts, ...topVerts].forEach(([x, y, z]) => { obj += `v ${x.toFixed(4)} ${y.toFixed(4)} ${z.toFixed(4)}\n`; });
@@ -938,12 +1234,13 @@ function App() {
   };
 
   const sunPos = getLondonSolarPosition(solarMonth, solarHour);
+  const alignAngleDeg = (siteBoundary.metadata.alignment_angle || 0) * (180 / Math.PI);
 
   // ============================================
   // RENDER
   // ============================================
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: "'Barlow', sans-serif", background: COLORS.bgDark }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", background: COLORS.bgDark }}>
 
       {/* Export context menu */}
       {exportMenu.visible && (
@@ -959,7 +1256,7 @@ function App() {
             background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`,
             boxShadow: '0 4px 12px rgba(0,0,0,0.15)', borderRadius: '4px',
             padding: '4px 0', display: 'flex', flexDirection: 'column',
-            minWidth: '140px', fontFamily: "'Barlow', sans-serif", zIndex: 10001
+            minWidth: '140px', fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", zIndex: 10001
           }}>
             {[
               { label: 'Save image as...', action: () => { const a = document.createElement('a'); a.download = exportMenu.fileName; a.href = exportMenu.imageData; a.click(); } },
@@ -977,20 +1274,22 @@ function App() {
       )}
 
       {/* TOP BAR */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.bgMedium, color: COLORS.textPrimary, padding: '15px 30px', borderBottom: `1px solid ${COLORS.borderMedium}`, zIndex: 999 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.bgMedium, color: COLORS.textPrimary, padding: '15px 30px', borderBottom: `1px solid ${COLORS.borderMedium}`, zIndex: 999, fontSize: '14px', textTransform: 'uppercase' }}>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
           <div style={{ display: 'flex', gap: '5px' }}>
             <button onClick={handleUndo} disabled={historyStep === 0} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === 0 ? 0.5 : 1 }}>↶</button>
             <button onClick={handleRedo} disabled={historyStep === history.length - 1} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === history.length - 1 ? 0.5 : 1 }}>↷</button>
           </div>
-          <h2 style={{ margin: 0, letterSpacing: '1px', fontSize: '20px', fontWeight: '700', color: COLORS.textPrimary }}>LinX Massing Engine</h2>
+          <h2 style={{ margin: 0, fontSize: '17px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, textTransform: 'none', whiteSpace: 'nowrap' }}>
+            <span style={{ fontWeight: 700 }}>LinX</span> Massing Engine
+          </h2>
         </div>
 
         <div style={{ display: 'flex', gap: '30px', alignItems: 'center', background: COLORS.bgLight, padding: '5px 15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '12px', color: COLORS.textSecondary, fontWeight: '500' }}>Target User:</label>
-            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Barlow', sans-serif" }}>
+            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Target User:</label>
+            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '14px', textTransform: 'uppercase' }}>
               <option value="Students">Students</option>
               <option value="Young Professional">Young Professional</option>
               <option value="Family">Family</option>
@@ -998,9 +1297,9 @@ function App() {
             </select>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '12px', color: COLORS.textSecondary, fontWeight: '500' }}>Residents:</label>
-            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px' }} />
-            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500' }}>Auto-Populate</button>
+            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
+            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '14px' }} />
+            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '14px', textTransform: 'uppercase' }}>Auto-Populate</button>
           </div>
         </div>
 
@@ -1014,13 +1313,16 @@ function App() {
           </div>
           {viewMode === '2D' && (
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '13px', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Processing...' : 'Randomize'}
               </button>
-              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '13px', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Calculating...' : 'Auto-Layout'}
               </button>
-              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '13px' }}>
+              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
+                + Green Areas
+              </button>
+              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
                 Import Boundary
               </button>
               <input type="file" id="boundaryFile" accept=".json" style={{ display: "none" }} onChange={handleFileSelected} />
@@ -1033,11 +1335,11 @@ function App() {
 
         {/* LEFT PANEL */}
         <div style={{ width: '240px', flexShrink: 0, background: COLORS.bgMedium, borderRight: `1px solid ${COLORS.borderMedium}`, padding: '20px', display: 'flex', flexDirection: 'column', zIndex: 10, overflowY: 'auto' }}>
-          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '14px' }}>FLOORS</h3>
+          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '13px' }}>FLOORS</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '15px' }}>
             {floors.map(f => (
               <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? COLORS.bgLight : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>Floor {f}</button>
+                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? COLORS.bgLight : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>{floorLabel(f)}</button>
                 <button onClick={() => handleDeleteFloor(f)} style={{ padding: '8px 6px', background: '#b86868', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>×</button>
               </div>
             ))}
@@ -1048,9 +1350,10 @@ function App() {
           <div style={{ marginTop: '25px', padding: '15px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
             <h4 style={{ color: COLORS.textPrimary, margin: '0 0 15px 0', fontSize: '11px', letterSpacing: '1px', fontWeight: '700' }}>DATA ANALYTICS</h4>
             {[
-              { label: 'Total Area:', value: `${metrics.totalM2} m²`, color: COLORS.textSecondary },
-              { label: 'Usable Space:', value: `${metrics.usableM2} m²`, color: '#6db388' },
-              { label: 'Circulation:', value: `${metrics.circM2} m²`, color: '#b89a6d' },
+              { label: 'Built Area:', value: `${metrics.totalM2} m²`, color: COLORS.textSecondary },
+              { label: 'Usable Space:', value: `${metrics.usableM2} m²`, color: COLORS.textPrimary },
+              { label: 'Circulation:', value: `${metrics.circM2} m²`, color: '#9a9690' },
+              { label: 'Green Area:', value: `${metrics.greenM2} m²`, color: '#7d8a6a' },
             ].map(item => (
               <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '11px' }}>
                 <span style={{ color: item.color }}>{item.label}</span>
@@ -1058,38 +1361,37 @@ function App() {
               </div>
             ))}
             <div style={{ width: '100%', background: COLORS.borderMedium, height: '8px', borderRadius: '4px', overflow: 'hidden', marginBottom: '5px' }}>
-              <div style={{ width: `${metrics.efficiency}%`, background: metrics.efficiency >= 75 ? '#6db388' : metrics.efficiency >= 60 ? '#b89a6d' : '#b86868', height: '100%', transition: 'width 0.3s' }} />
+              <div style={{ width: `${metrics.efficiency}%`, background: metrics.efficiency >= 75 ? COLORS.accent : metrics.efficiency >= 60 ? '#9a9690' : '#b0746c', height: '100%', transition: 'width 0.3s' }} />
             </div>
-            <div style={{ textAlign: 'right', fontSize: '10px', color: COLORS.textSecondary, marginBottom: '15px' }}>
-              Efficiency: <span style={{ color: metrics.efficiency >= 75 ? '#6db388' : '#b89a6d', fontWeight: '600' }}>{metrics.efficiency}%</span>
+            <div style={{ textAlign: 'right', fontSize: '11px', color: COLORS.textSecondary, marginBottom: '15px' }}>
+              Efficiency: <span style={{ color: metrics.efficiency >= 75 ? COLORS.accent : COLORS.textSecondary, fontWeight: '600' }}>{metrics.efficiency}%</span>
             </div>
             <button onClick={handleExportJSON} style={{ width: '100%', padding: '10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '11px' }}>Export All Floors JSON</button>
           </div>
 
           {/* SITE BOUNDARY */}
           <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '10px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SITE BOUNDARY</h4>
-            <div style={{ fontSize: '10px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
+            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SITE BOUNDARY</h4>
+            <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>SITE:</span> {siteBoundary.name}</div>
               {siteBoundary.metadata?.original_area_m2 && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>AREA:</span> {siteBoundary.metadata.original_area_m2.toFixed(0)} m²</div>}
-              {siteBoundary.metadata?.grid_cell_size_m  && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>GRID:</span> {siteBoundary.metadata.grid_cell_size_m}m cells</div>}
-              <div><span style={{ fontWeight: '600' }}>DIMS:</span> {pixelsToMeters(siteBoundary.maxX - siteBoundary.minX)}m × {pixelsToMeters(siteBoundary.maxY - siteBoundary.minY)}m</div>
+              <div><span style={{ fontWeight: '600' }}>OFFSET:</span> {alignAngleDeg.toFixed(1)}° True North</div>
             </div>
           </div>
 
           {/* SHADOW & DAYLIGHT CONTROLS */}
           <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: '#b86868', margin: '0 0 8px 0', fontSize: '10px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SHADOW & DAYLIGHT (LONDON)</h4>
-            <div style={{ fontSize: '10px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
+            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SHADOW & DAYLIGHT (LONDON)</h4>
+            <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
                 <span>Month:</span><span>{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][solarMonth - 1]}</span>
               </div>
-              <input type="range" min="1" max="12" value={solarMonth} onChange={e => setSolarMonth(parseInt(e.target.value))} style={{ width: '100%', marginBottom: '10px' }} />
+              <input type="range" min="1" max="12" value={solarMonth} onChange={e => setSolarMonth(parseInt(e.target.value))} style={{ width: '100%', marginBottom: '10px', accentColor: COLORS.accent }} />
               
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
                 <span>Time:</span><span>{solarHour.toString().padStart(2, '0')}:00</span>
               </div>
-              <input type="range" min="0" max="24" value={solarHour} onChange={e => setSolarHour(parseInt(e.target.value))} style={{ width: '100%' }} />
+              <input type="range" min="0" max="24" value={solarHour} onChange={e => setSolarHour(parseInt(e.target.value))} style={{ width: '100%', accentColor: COLORS.accent }} />
             </div>
           </div>
         </div>
@@ -1099,7 +1401,7 @@ function App() {
           {viewMode === 'GRAPH' ? (
             <div id="view-graph" onContextMenu={e => handleRightClickExport(e, 'GRAPH')} style={{ width: '100%', height: '100%', background: COLORS.bgLight, position: 'relative' }}>
               <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-                <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '14px', fontWeight: '600' }}>Topology Graph</h3>
+                <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>Topology Graph</h3>
                 <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: COLORS.textSecondary }}>Space Syntax node-edge mapping.</p>
                 <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ width: '100%', padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '11px', opacity: isCalculating ? 0.6 : 1 }}>
                   {isCalculating ? 'Processing...' : '↻ Refresh Connections'}
@@ -1107,7 +1409,7 @@ function App() {
               </div>
               <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}`, minWidth: '180px' }}>
                 <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', color: COLORS.textPrimary }}>Node Typologies</h4>
-                {[['#b3b3b3','Core / Circulation'],['#7c2b2b','Residential Unit'],['#5c5c5c','Private Communal'],['#dfa39c','Public Buffer']].map(([color, label]) => (
+                {[['#9a9690','Core / Circulation'],['#6e2424','Residential Unit'],['#6a665f','Private Communal'],['#b0746c','Public Buffer'],['#7d8a6a','Green Area']].map(([color, label]) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                     <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: color }} />
                     <span style={{ fontSize: '11px', color: COLORS.textSecondary }}>{label}</span>
@@ -1156,9 +1458,8 @@ function App() {
             <div id="view-3d" onContextMenu={e => handleRightClickExport(e, '3D')} style={{ width: '100%', height: '100%', background: COLORS.bgLight }}>
               <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10 }}>
                 <div style={{ background: 'rgba(255,255,255,0.8)', padding: '15px', borderRadius: '8px', marginBottom: '15px', border: `1px solid ${COLORS.borderMedium}` }}>
-                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '14px', fontWeight: '600' }}>3D Massing Model</h3>
+                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>3D Massing Model</h3>
                   <p style={{ margin: 0, fontSize: '11px', color: COLORS.textSecondary }}>Left Click = Orbit | Right Click = Pan | Scroll = Zoom</p>
-                  <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: COLORS.accent, fontWeight: '600' }}>London Solar Path active.</p>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Massing .OBJ</button>
@@ -1218,13 +1519,18 @@ function App() {
                   <div style={{ flex: 1, position: 'relative', background: COLORS.bgLight, overflow: 'hidden' }} id="canvas-container">
                     <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, transform: `translate(${canvasPan.x}px, ${canvasPan.y}px) scale(${canvasZoom})`, transformOrigin: '0 0', cursor: isDraggingCanvas ? 'grabbing' : 'grab', zIndex: 1 }}>
 
+                      {/* TRUE 1x1m Visual Grid matched to internally snapping at 20px */}
                       <svg width="100%" height="100%" style={{ position: 'absolute', top: 0, left: 0, overflow: 'visible' }} id="canvas-svg">
                         <defs>
-                          <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
-                            <path d="M 60 0 L 0 0 0 60" fill="none" stroke={COLORS.borderMedium} strokeWidth="1.5" />
+                          <pattern id="smallGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                            <path d="M 20 0 L 0 0 0 20" fill="none" stroke={COLORS.borderMedium} strokeWidth="0.5" />
+                          </pattern>
+                          <pattern id="grid" width="100" height="100" patternUnits="userSpaceOnUse">
+                            <rect width="100" height="100" fill="url(#smallGrid)" />
+                            <path d="M 100 0 L 0 0 0 100" fill="none" stroke={COLORS.borderDark} strokeWidth="1" />
                           </pattern>
                         </defs>
-                        <rect id="canvas-background" x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid)" opacity="0.6" />
+                        <rect id="canvas-background" x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid)" opacity="0.4" />
 
                         {siteBoundary.metadata?.polygon_pixels?.length > 0 ? (
                           <>
@@ -1277,7 +1583,6 @@ function App() {
                           const displayName = room.category.split(' - ')[1];
                           const displayArea = room.area || getCalculatedRoomAreaM2(room.width, room.height, displayName, COMMUNAL_GW_GH, GRID_SIZE);
                           
-                          // Styling for Daylight Score
                           const hasScore = room.daylight_score !== undefined && room.daylight_score !== null;
                           const scoreColor = !hasScore ? '' : room.daylight_score >= 0.4 ? '#6db388' : room.daylight_score >= 0.2 ? '#c2a37a' : '#b86868';
                           const isWarning = hasScore && room.daylight_score < 0.2;
@@ -1313,6 +1618,7 @@ function App() {
                                     strokeWidth={selectedRoomId === room.id ? "5" : isWarning ? "4" : "3"}
                                     style={{ transformOrigin: '50% 50%', transform: `scaleX(${room.flipX ? -1 : 1}) rotate(${room.rotation}deg)` }}
                                   />
+                                  <WallPlan2D room={room} />
                                 </svg>
 
                                 <div
@@ -1332,12 +1638,12 @@ function App() {
 
                                   {/* Room label */}
                                   <div style={roomLabelContainerStyle}>
-                                    <span style={{ fontSize: '10px', fontWeight: '600', textShadow: '1px 1px 2px rgba(0,0,0,0.8)' }}>{displayName}</span>
-                                    <span style={{ fontSize: '9px', opacity: 0.9, textShadow: '1px 1px 2px rgba(0,0,0,0.8)', marginTop: '2px' }}>{displayArea}m²</span>
+                                    <span style={{ fontSize: '11px', fontWeight: '400', textShadow: '1px 1px 2px rgba(0,0,0,0.8)' }}>{displayName}</span>
+                                    <span style={{ fontSize: '11px', opacity: 0.9, textShadow: '1px 1px 2px rgba(0,0,0,0.8)', marginTop: '2px' }}>{displayArea}m²</span>
                                     
                                     {/* Daylight Badge */}
                                     {hasScore && (
-                                      <span style={{ fontSize: '7px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
+                                      <span style={{ fontSize: '11px', color: '#fff', background: scoreColor, padding: '2px 4px', borderRadius: '3px', marginTop: '4px', fontWeight: '700' }}>
                                         Daylight: {Math.round(room.daylight_score * 100)}%
                                       </span>
                                     )}
@@ -1351,18 +1657,17 @@ function App() {
                     </div>
                   </div>
 
-                  {/* North arrow */}
                   <div className="no-export" style={{ position: 'absolute', bottom: '30px', left: '30px', zIndex: 20, pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                    <svg width="40" height="60" viewBox="0 0 40 60" fill="none">
+                    <svg width="40" height="60" viewBox="0 0 40 60" fill="none" style={{ transform: `rotate(${alignAngleDeg}deg)` }}>
                       <path d="M20 0 L40 40 L20 30 L0 40 Z" fill="#b86868" />
-                      <text x="20" y="55" fill="#333333" fontSize="14px" fontWeight="bold" textAnchor="middle" fontFamily="'Barlow', sans-serif">N</text>
+                      <text x="20" y="55" fill="#333333" fontSize="13px" fontWeight="bold" textAnchor="middle" fontFamily="'Jost', sans-serif">N</text>
                     </svg>
                   </div>
 
                   {/* Floor controls */}
                   <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', color: COLORS.textSecondary, fontWeight: '600', fontSize: '16px', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-                      <span style={{ fontSize: '13px' }}>FLOOR {floor} {activeFloor === floor && <span style={{ color: COLORS.accent, fontSize: '12px' }}>(Active)</span>}</span>
+                      <span style={{ fontSize: '13px' }}>{floorLabel(floor).toUpperCase()} {activeFloor === floor && <span style={{ color: COLORS.accent, fontSize: '12px' }}>(Active)</span>}</span>
                       <span style={{ fontSize: '11px', background: COLORS.bgMedium, color: COLORS.textSecondary, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${COLORS.borderMedium}` }}>Residents: {getResidentsForFloor(floor)}</span>
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -1372,13 +1677,13 @@ function App() {
                         { label: 'Clear Floor',action: () => handleResetFloor(floor),      bg: '#b86868',         color: 'white', border: 'none' },
                         { label: 'Export JSON',action: () => handleExportFloorJSON(floor), bg: COLORS.accent,     color: COLORS.bgLight, border: 'none' },
                       ].map(btn => (
-                        <button key={btn.label} onClick={btn.action} style={{ padding: '4px 10px', background: btn.bg, color: btn.color, border: btn.border, borderRadius: '4px', cursor: 'pointer', fontSize: '10px', fontWeight: '600', pointerEvents: 'auto' }}>{btn.label}</button>
+                        <button key={btn.label} onClick={btn.action} style={{ padding: '4px 10px', background: btn.bg, color: btn.color, border: btn.border, borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: '600', pointerEvents: 'auto' }}>{btn.label}</button>
                       ))}
                     </div>
                   </div>
 
                   {/* Help overlay */}
-                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '10px', fontWeight: '600', zIndex: 10, background: 'rgba(255,255,255,0.8)', padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
+                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600', zIndex: 10, background: 'rgba(255,255,255,0.8)', padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
                     <span style={{ color: COLORS.accent }}>Double-Click:</span> Lock/Pin<br/>
                     <span style={{ color: COLORS.accent }}>Select + Delete:</span> Delete Room<br/>
                     <span style={{ color: COLORS.accent }}>Right-Click (Room):</span> Rotate<br/>
@@ -1405,7 +1710,7 @@ function App() {
 
           {Object.entries(communalComponents).map(([groupName, items]) => (
             <div key={groupName} style={{ marginBottom: '25px' }}>
-              <div style={{ color: COLORS.textSecondary, fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>{groupName}</div>
+              <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>{groupName}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 {items.map(itemName => (
                   <button key={itemName} onClick={() => handleAddRoom(groupName, itemName)}
@@ -1418,12 +1723,12 @@ function App() {
           ))}
 
           <div style={{ marginBottom: '25px' }}>
-            <div style={{ color: COLORS.textSecondary, fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>Residential Unit Catalog</div>
+            <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>Residential Unit Catalog</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {residentialComponents.map(itemName => {
                 const isActive = activeCatalogContext === itemName;
                 return (
-                  <button key={itemName} onClick={() => setActiveCatalogContext(isActive ? null : itemName)}
+                  <button key={itemName} onClick={(e) => { setCatalogAnchorTop(e.currentTarget.getBoundingClientRect().top); setActiveCatalogContext(isActive ? null : itemName); }}
                     style={{ padding: '8px', background: isActive ? COLORS.borderMedium : COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '11px', display: 'flex', justifyContent: 'space-between' }}>
                     <span>Browse {itemName}</span>
                     <span style={{ color: isActive ? COLORS.accent : COLORS.textSecondary, transform: isActive ? 'rotate(180deg)' : 'none' }}>&lt;</span>
@@ -1434,8 +1739,11 @@ function App() {
           </div>
 
           {activeCatalogContext && (
-            <div style={{ marginBottom: '25px' }}>
-              <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600', marginBottom: '10px' }}>{activeCatalogContext} Options</div>
+            <div style={{ position: 'fixed', top: Math.max(8, Math.min(catalogAnchorTop, window.innerHeight - (90 + CATALOG_DATA[activeCatalogContext].length * 74))), right: 296, width: 250, background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '6px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', padding: '14px', zIndex: 50, maxHeight: '85vh', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600' }}>{activeCatalogContext} Options</div>
+                <span onClick={() => setActiveCatalogContext(null)} style={{ cursor: 'pointer', color: COLORS.textSecondary, fontWeight: '700', fontSize: '16px', lineHeight: '1' }}>×</span>
+              </div>
               {CATALOG_DATA[activeCatalogContext].map((opt, i) => (
                 <div key={i} onClick={() => handleAddCatalogRoom("Residential Unit", activeCatalogContext, opt)}
                   style={{ background: 'rgba(255,255,255,0.5)', borderBottom: `1px solid ${COLORS.borderMedium}`, padding: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '5px' }}>
@@ -1445,9 +1753,9 @@ function App() {
                     </svg>
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ color: COLORS.textPrimary, fontSize: '10px', fontWeight: '600' }}>{opt.opt}</div>
-                    <div style={{ color: COLORS.textSecondary, fontSize: '9px', marginTop: '2px' }}>Area: {opt.area} m²</div>
-                    <div style={{ color: COLORS.accent, fontSize: '9px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
+                    <div style={{ color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600' }}>{opt.opt}</div>
+                    <div style={{ color: COLORS.textSecondary, fontSize: '11px', marginTop: '2px' }}>Area: {opt.area} m²</div>
+                    <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
                   </div>
                   <div style={{ color: COLORS.accent, fontWeight: '600', fontSize: '16px' }}>+</div>
                 </div>
