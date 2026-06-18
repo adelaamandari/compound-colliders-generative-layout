@@ -1281,15 +1281,15 @@ function App() {
             <button onClick={handleUndo} disabled={historyStep === 0} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === 0 ? 0.5 : 1 }}>↶</button>
             <button onClick={handleRedo} disabled={historyStep === history.length - 1} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === history.length - 1 ? 0.5 : 1 }}>↷</button>
           </div>
-          <h2 style={{ margin: 0, fontSize: '17px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, textTransform: 'none', whiteSpace: 'nowrap' }}>
+          <h2 style={{ margin: 0, fontSize: '24px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, textTransform: 'none', whiteSpace: 'nowrap' }}>
             <span style={{ fontWeight: 700 }}>LinX</span> Massing Engine
           </h2>
         </div>
 
         <div style={{ display: 'flex', gap: '30px', alignItems: 'center', background: COLORS.bgLight, padding: '5px 15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Target User:</label>
-            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '14px', textTransform: 'uppercase' }}>
+            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Target User:</label>
+            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
               <option value="Students">Students</option>
               <option value="Young Professional">Young Professional</option>
               <option value="Family">Family</option>
@@ -1297,32 +1297,32 @@ function App() {
             </select>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '14px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
-            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '14px' }} />
-            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '14px', textTransform: 'uppercase' }}>Auto-Populate</button>
+            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
+            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '12px', letterSpacing: '0.5px' }} />
+            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Auto-Populate</button>
           </div>
         </div>
 
         <div style={{ display: 'flex', gap: '15px' }}>
           <div style={{ display: 'flex', background: COLORS.bgMedium, borderRadius: '4px', overflow: 'hidden', border: `1px solid ${COLORS.borderMedium}` }}>
             {['2D', '3D', 'GRAPH'].map(mode => (
-              <button key={mode} onClick={() => setViewMode(mode)} style={{ padding: '10px 20px', background: viewMode === mode ? COLORS.accent : 'transparent', color: viewMode === mode ? COLORS.bgLight : COLORS.textPrimary, border: 'none', cursor: 'pointer', fontWeight: '600' }}>
+              <button key={mode} onClick={() => setViewMode(mode)} style={{ padding: '10px 20px', background: viewMode === mode ? COLORS.accent : 'transparent', color: viewMode === mode ? COLORS.bgLight : COLORS.textPrimary, border: 'none', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
                 {mode === '2D' ? '2D PLAN' : mode === '3D' ? '3D VIEW' : 'GRAPH VIEW'}
               </button>
             ))}
           </div>
           {viewMode === '2D' && (
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Processing...' : 'Randomize'}
               </button>
-              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
+              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
                 {isCalculating ? 'Calculating...' : 'Auto-Layout'}
               </button>
-              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
+              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
                 + Green Areas
               </button>
-              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', textTransform: 'uppercase' }}>
+              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
                 Import Boundary
               </button>
               <input type="file" id="boundaryFile" accept=".json" style={{ display: "none" }} onChange={handleFileSelected} />
