@@ -83,6 +83,16 @@ const getSemanticColor = (category) => {
   return '#bdbab5';
 };
 
+// Outdoor green spaces (gardens / playgrounds). These are modelled as a thin
+// green ground plane rather than a storey, so their height is clamped to
+// GREEN_AREA_HEIGHT (never extruded into a massing block), even when the
+// backend assigns them a programme floor height.
+const isGreenSpaceCategory = (category) => {
+  if (!category) return false;
+  const cat = category.toLowerCase();
+  return cat.includes('green') || cat.includes('garden') || cat.includes('playground');
+};
+
 // Floor display label: first floor is the Ground Floor, then Floor 1, 2, 3...
 const floorLabel = (n) => (n === 1 ? 'Ground Floor' : `Floor ${n - 1}`);
 
@@ -250,7 +260,7 @@ const COMMUNAL_GW_GH = {
   "Core":               { gw: 6,  gh: 6,    path: "0,0 100,0 100,100 0,100" },
   "Lobby":              { gw: 9,  gh: 9,    path: "0,0 100,0 100,100 0,100" },
   "Stairs":             { gw: 3,  gh: 6,    path: "0,0 100,0 100,100 0,100" },
-  "Corridor":           { gw: 3,  gh: 15,   path: "0,0 100,0 100,100 0,100" },
+  "Corridor":           { gw: 2,  gh: 15,   path: "0,0 100,0 100,100 0,100" },
   "Shared Kitchen":     { gw: 12, gh: 3,    path: "0,0 100,0 100,100 0,100" },
   "Shared Living Room": { gw: 9,  gh: 6,    path: "0,0 100,0 100,100 0,100" },
   "Game Room":          { gw: 6,  gh: 3,    path: "0,0 100,0 100,100 0,100" },
@@ -500,6 +510,7 @@ function App() {
   const [history,             setHistory]             = useState([[]]);
   const [historyStep,         setHistoryStep]         = useState(0);
   const [targetUser,          setTargetUser]          = useState('Mix');
+  const [layoutType,          setLayoutType]          = useState('towers');
   const [population,          setPopulation]          = useState(15);
   const [isCalculating,       setIsCalculating]       = useState(false);
   const [viewMode,            setViewMode]            = useState('2D');
@@ -511,15 +522,19 @@ function App() {
 
   const [siteBoundary, setSiteBoundary] = useState(() => processBoundary({
     type: "Polygon",
-    name: "Imported Boundary JSON",
-    gridSize: 20,
+    name: "Imported JSON Boundary",
+    gridSize: 15,
     metadata: {
-      original_area_m2: 1499,
-      grid_cell_size_m: 2,
+      original_area_m2: 8168.1052396441655,
+      grid_cell_size_m: 5,
+      grid_rotation_deg: 0,
+      // Default site = void_boundary_1781800099007.json (8168 m²), parsed to
+      // pixel space by /api/parse-void-boundary; processBoundary aligns it.
       polygon_pixels: [
-        [894, 1188],[389, 1232],[150, 371],
-        [301, 261],[761, 150],[939, 893],
-        [863, 914],[847, 959],[848, 1012]
+        [2511.1722442027035, 1134.1237132869555],
+        [2080.1793561971745, 2790.761265245512],
+        [150.0, 1498.7024060402046],
+        [1259.5280274194058, 150.0]
       ]
     }
   }));
@@ -790,7 +805,9 @@ function App() {
     const libraryBelow = rooms.some(r => r.floor === activeFloor - 1 && (r.category || '').includes('Library'));
     const addLibraryOnce = () => { if (!libraryBelow) addRoom("Private Communal", "Library"); };
 
-    if (activeFloor === 1) addRoom("Circulation", "Lobby");
+    // A site has a single lobby. Only add one if none already exists anywhere.
+    const lobbyExists = rooms.some(r => (r.category || '').includes('Lobby'));
+    if (activeFloor === 1 && !lobbyExists) addRoom("Circulation", "Lobby");
 
     if (targetUser === 'Students') {
       const studioPop = Math.floor(remainingPop * 0.4);
@@ -830,9 +847,11 @@ function App() {
       }
     }
 
+    // One central core per floor: rooms pack into a single compact block around
+    // it (the backend threads it with a comb of corridors). Towers express height
+    // by stacking floors rather than spreading footprints across the site.
     addRoom("Circulation", "Core");
-    addRoom("Circulation", "Corridor");
-    addRoom("Circulation", "Corridor");
+    for (let c = 0; c < 4; c++) addRoom("Circulation", "Corridor");
 
     if (targetUser === 'Students') {
       addRoom("Private Communal", "Shared Kitchen"); addRoom("Private Communal", "Shared Living Room");
@@ -841,6 +860,22 @@ function App() {
       addLibraryOnce(); addRoom("Private Communal", "Concentration Pod"); addRoom("Private Communal", "Meeting Room");
     } else if (targetUser === 'Family') {
       addRoom("Private Communal", "Game Room"); addRoom("Private Communal", "Workspace Room");
+    }
+
+    // Point Towers stack residents vertically: spread the residential units over
+    // several floors and clone the cores + corridors onto each floor so every
+    // tower rises through all of them. Lobby / communal / buffer stay on ground.
+    if (layoutType === 'towers') {
+      const numFloors = Math.min(6, Math.max(2, Math.round(remainingPop / 14)));
+      if (numFloors > 1) {
+        const resUnits = newRooms.filter(r => (r.category || '').startsWith('Residential'));
+        const circ     = newRooms.filter(r => /Core|Corridor/.test(r.category || ''));
+        resUnits.forEach((r, i) => { r.floor = (i % numFloors) + 1; });
+        for (let f = 2; f <= numFloors; f++) {
+          circ.forEach(src => newRooms.push({ ...src, id: `${src.id}-f${f}`, floor: f }));
+        }
+        setFloors(Array.from({ length: numFloors }, (_, i) => i + 1));
+      }
     }
 
     updateRoomsWithHistory([...rooms, ...newRooms]);
@@ -901,11 +936,17 @@ function App() {
       const response = await fetch('http://127.0.0.1:8000/api/straighten-walls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetUser, activeFloor, rooms, randomize: shouldRandomize, boundary: siteBoundary })
+        body: JSON.stringify({ targetUser, activeFloor, rooms, randomize: shouldRandomize, boundary: siteBoundary, layoutType })
       });
       const data = await response.json();
       if (data.status === 'success') {
-        const sortedRooms = data.rooms.sort((a, b) => a.floor - b.floor);
+        // The backend assigns programme floor heights (e.g. Garden = 6m). Outdoor
+        // green spaces must stay a thin ground plane in the model, so clamp their
+        // height back to GREEN_AREA_HEIGHT — this keeps them rendering as a thin
+        // layer (not a massing block) in both the 3D view and the 2D void logic.
+        const sortedRooms = data.rooms
+          .map(r => isGreenSpaceCategory(r.category) ? { ...r, floor_height: GREEN_AREA_HEIGHT } : r)
+          .sort((a, b) => a.floor - b.floor);
         setRooms(sortedRooms);
         setRules(data.rules);
         const maxFloor = Math.max(...data.rooms.map(r => r.floor));
@@ -915,29 +956,6 @@ function App() {
       alert("Backend error. Make sure Python server is running on http://127.0.0.1:8000");
     }
     setIsCalculating(false);
-  };
-
-  const handleUploadBoundary = () => document.getElementById('boundaryFile').click();
-
-  const handleFileSelected = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-      const response = await fetch('http://127.0.0.1:8000/api/parse-void-boundary', { method: 'POST', body: formData });
-      const data = await response.json();
-      if (data.status === 'success') {
-        const processed = processBoundary(data.boundary);
-        setSiteBoundary(processed);
-        const { zoom, pan } = calculateOptimalZoom(processed);
-        setCanvasZoom(zoom); setCanvasPan(pan);
-      } else {
-        alert(`Error: ${data.message}`);
-      }
-    } catch (error) {
-      alert(`Upload failed: ${error.message}`);
-    }
   };
 
   const handleDragStop = (room, e, d) => {
@@ -1297,6 +1315,14 @@ function App() {
             </select>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Typology:</label>
+            <select value={layoutType} onChange={e => setLayoutType(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
+              <option value="towers">Point Towers</option>
+              <option value="mat">Integrated Mat</option>
+              <option value="courtyard">Courtyard Block</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
             <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '12px', letterSpacing: '0.5px' }} />
             <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Auto-Populate</button>
@@ -1322,10 +1348,6 @@ function App() {
               <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
                 + Green Areas
               </button>
-              <button onClick={handleUploadBoundary} style={{ padding: '10px 20px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
-                Import Boundary
-              </button>
-              <input type="file" id="boundaryFile" accept=".json" style={{ display: "none" }} onChange={handleFileSelected} />
             </div>
           )}
         </div>
@@ -1560,19 +1582,30 @@ function App() {
 
                       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
                         
-                        {/* Dynamic Void Rendering */}
+                        {/* Dynamic Void Rendering — follows the room's real footprint
+                            (shapePath) and uses the SAME rotate/flip transform as the
+                            placed room, so a rotated room (e.g. a Garden) projects a void
+                            that matches its actual shape instead of a big bounding-box block. */}
                         {rooms.filter(r => r.floor < floor && ((r.floor - 1) * FLOOR_TO_FLOOR_HEIGHT + (r.floor_height || getRoomFloorHeight(r.category))) > ((floor - 1) * FLOOR_TO_FLOOR_HEIGHT)).map(room => {
                           const displayName = room.category.split(' - ')[1];
+                          const voidStroke = room.borderColor || COLORS.borderDark;
                           return (
                             <div key={`void-${room.id}`} style={{
                                 position: 'absolute', left: room.x, top: room.y, width: room.width, height: room.height,
-                                background: 'repeating-linear-gradient(45deg, rgba(200,200,200,0.1), rgba(200,200,200,0.1) 10px, rgba(200,200,200,0.2) 10px, rgba(200,200,200,0.2) 20px)',
-                                border: `2px dashed ${COLORS.borderDark}`,
-                                zIndex: 1, pointerEvents: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                transform: `scaleX(${room.flipX ? -1 : 1}) rotate(${room.rotation}deg)`,
-                                transformOrigin: '50% 50%'
+                                zIndex: 1, pointerEvents: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center'
                             }}>
-                                <span style={{ fontSize: '12px', color: COLORS.textSecondary, fontWeight: '700', textShadow: '1px 1px 0 #fff' }}>
+                                <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', top: 0, left: 0, overflow: 'visible' }}>
+                                  <polygon
+                                    points={room.shapePath || '0,0 100,0 100,100 0,100'}
+                                    fill={`${voidStroke}22`}
+                                    stroke={voidStroke}
+                                    strokeWidth="2"
+                                    strokeDasharray="6,4"
+                                    vectorEffect="non-scaling-stroke"
+                                    style={{ transformOrigin: '50% 50%', transform: `scaleX(${room.flipX ? -1 : 1}) rotate(${room.rotation}deg)` }}
+                                  />
+                                </svg>
+                                <span style={{ position: 'relative', fontSize: '12px', color: COLORS.textSecondary, fontWeight: '700', textShadow: '1px 1px 0 #fff' }}>
                                     {displayName} (Void)
                                 </span>
                             </div>

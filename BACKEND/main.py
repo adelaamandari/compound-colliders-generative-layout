@@ -66,6 +66,10 @@ class LayoutRequest(BaseModel):
     rooms: List[Room]
     randomize: bool = False
     boundary: Optional[BoundaryConfig] = None
+    # Massing typology: "towers" (spread point blocks), "mat" (merged low-rise
+    # weave) or "courtyard" (rooms ring a central court). Drives core spread and
+    # how rooms are pulled relative to the cores / site centre.
+    layoutType: str = "towers"
 
 
 # ============================================================
@@ -80,9 +84,9 @@ PROGRAMME_FLOOR_HEIGHT = {
     "Mini Cinema":        6.0,
     "Garden":             6.0,
     "Multipurpose Hall":  6.0,
-    "Gym":                3.0,
-    "Events Room":        3.0,
-    "Indoor Play Area":   3.0,
+    "Gym":                4.5,
+    "Events Room":        4.5,
+    "Indoor Play Area":   4.5,
     "Core":               3.0,
     "Stairs":             3.0,
     "Corridor":           3.0,
@@ -227,8 +231,9 @@ def is_overlap(x, y, w, h, floor, occupancy):
 def auto_layout(request: LayoutRequest):
     rooms = request.rooms
     boundary = request.boundary
-    snap_grid = 20  
+    snap_grid = 20
     randomize = request.randomize
+    layout_type = (request.layoutType or "towers").lower()
 
     poly_pixels = boundary.metadata.get("polygon_pixels") if boundary and boundary.metadata else None
     min_x = int(boundary.minX) if boundary and boundary.minX is not None else 30
@@ -265,151 +270,314 @@ def auto_layout(request: LayoutRequest):
     for r in unpinned_rooms:
         rooms_by_floor.setdefault(r.floor, []).append(r)
 
+    # Structural systems that sit comfortably next to each other (shared grid).
+    struct_adjacency = {
+        ("C1", "C2A"), ("C2A", "C1"),
+        ("C2A", "C2B"), ("C2B", "C2A"),
+        ("C2B", "C3"), ("C3", "C2B"),
+        ("C3", "C4"), ("C4", "C3"),
+    }
+
+    # Keep everything a little off the site edge so masses don't snap to the
+    # boundary line.
+    border_margin = 3 * snap_grid  # 3 m inset from the site border
+
+    def within_site(x, y, w, h):
+        # True only when the footprint PLUS a border margin sits inside the site,
+        # which effectively insets the usable area away from the boundary.
+        return is_within_bounds(x - border_margin, y - border_margin,
+                                w + 2 * border_margin, h + 2 * border_margin,
+                                poly_pixels, min_x, max_x, min_y, max_y)
+
+    def shares_edge(x, y, w, h, p):
+        # True when rect (x, y, w, h) is flush against room p on any side.
+        v_overlap = min(y + h, p.y + p.height) - max(y, p.y)
+        h_overlap = min(x + w, p.x + p.width) - max(x, p.x)
+        touch_x = (x == p.x + p.width or x + w == p.x) and v_overlap > 0
+        touch_y = (y == p.y + p.height or y + h == p.y) and h_overlap > 0
+        return touch_x or touch_y
+
+    # For "towers", cores on floors above 1 stack directly over the floor-1
+    # cores (a real tower) instead of being spread independently per floor.
+    tower_core_positions = []
+
     for floor_num in sorted(rooms_by_floor.keys()):
         floor_rooms = rooms_by_floor[floor_num]
 
         cores      = [r for r in floor_rooms if "Core" in r.category]
         corridors  = [r for r in floor_rooms if "Corridor" in r.category]
+        lobbies    = [r for r in floor_rooms if "Lobby" in r.category]
         communals  = [r for r in floor_rooms if "Communal" in r.category or "Buffer" in r.category]
-        residential = [r for r in floor_rooms if r not in cores and r not in corridors and r not in communals]
+        residential = [r for r in floor_rooms
+                       if r not in cores and r not in corridors
+                       and r not in communals and r not in lobbies]
 
-        for core in cores:
+        for core_idx, core in enumerate(cores):
             floor_occ = occupancy.get(floor_num, [])
-            if not floor_occ:
+            half_w, half_h = core.width / 2, core.height / 2
+
+            if layout_type == "towers" and floor_num > 1 and core_idx < len(tower_core_positions):
+                # Stack this upper-floor core directly over its floor-1 core (a tower).
+                cx, cy = tower_core_positions[core_idx]
+            elif not floor_occ:
                 cx, cy = center_x, center_y
             else:
-                best_dist = -1
+                # Keep masses CENTRAL: pick the non-overlapping slot closest to the
+                # site centre that is still at least `min_gap` from the cores already
+                # placed — so towers stay distinct without being flung to the border.
+                min_gap = 0 if layout_type == "mat" else 18 * snap_grid
+                best_metric = float('inf')
                 best_pos = (center_x, center_y)
+                relaxed_metric, relaxed_pos = float('inf'), (center_x, center_y)
                 for x in range(min_x, max_x, snap_grid * 2):
                     for y in range(min_y, max_y, snap_grid * 2):
-                        if is_within_bounds(x, y, core.width, core.height, poly_pixels, min_x, max_x, min_y, max_y):
-                            if not is_overlap(x, y, core.width, core.height, floor_num, occupancy):
-                                min_dist = min(
-                                    math.sqrt((x - (ox + ow/2))**2 + (y - (oy + oh/2))**2)
-                                    for ox, oy, ow, oh in floor_occ
-                                )
-                                if min_dist > best_dist:
-                                    best_dist = min_dist
-                                    best_pos = (x, y)
-                cx, cy = best_pos
+                        if not within_site(x, y, core.width, core.height):
+                            continue
+                        if is_overlap(x, y, core.width, core.height, floor_num, occupancy):
+                            continue
+                        ccx, ccy = x + half_w, y + half_h
+                        dcenter = math.hypot(ccx - center_x, ccy - center_y)
+                        if dcenter < relaxed_metric:
+                            relaxed_metric, relaxed_pos = dcenter, (ccx, ccy)
+                        dmin = min(math.hypot(ccx - (ox + ow / 2), ccy - (oy + oh / 2))
+                                   for ox, oy, ow, oh in floor_occ)
+                        if dmin < min_gap:
+                            continue
+                        if dcenter < best_metric:
+                            best_metric, best_pos = dcenter, (ccx, ccy)
+                cx, cy = best_pos if best_metric < float('inf') else relaxed_pos
 
-            cx = (int(cx - core.width / 2) // snap_grid) * snap_grid
-            cy = (int(cy - core.height / 2) // snap_grid) * snap_grid
+            cx = (int(cx - half_w) // snap_grid) * snap_grid
+            cy = (int(cy - half_h) // snap_grid) * snap_grid
 
-            if not is_within_bounds(cx, cy, core.width, core.height, poly_pixels, min_x, max_x, min_y, max_y):
-                cx, cy = min_x + snap_grid, min_y + snap_grid
+            if not within_site(cx, cy, core.width, core.height):
+                cx, cy = min_x + border_margin, min_y + border_margin
 
             core.x, core.y, core.pinned = cx, cy, True
-            
+
+            if floor_num == 1:
+                tower_core_positions.append((core.x + half_w, core.y + half_h))
+
             # PROJECT VOIDS UPWARDS
             num_floors = int(max(1, round(core.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
             for f in range(core.floor, core.floor + num_floors):
                 occupancy[f].append((cx, cy, core.width, core.height))
             placed_rooms.append(core)
 
-        pack_order = corridors + communals + residential
-        if randomize:
-            random.shuffle(corridors)
-            random.shuffle(communals)
-            random.shuffle(residential)
-            pack_order = corridors + communals + residential
-        else:
-            pack_order.sort(key=lambda r: (0 if "Corridor" in r.category else 1, -(r.width * r.height)))
-
-        for room in pack_order:
-            room_code = get_shortcode(room.category)
-            best_score = -float('inf')
-            best_pos = None
-
-            candidates: set = set()
-            floor_placed = [r for r in placed_rooms if r.floor == floor_num]
-            floor_cores  = [r for r in floor_placed if "Core" in r.category]
-
-            for p in floor_placed:
-                px, py, pw, ph = p.x, p.y, p.width, p.height
-                rw, rh = room.width, room.height
-                for x in range(int(px - rw + snap_grid), int(px + pw), snap_grid):
-                    candidates.add((x, py - rh))
-                    candidates.add((x, py + ph))
-                for y in range(int(py - rh + snap_grid), int(py + ph), snap_grid):
-                    candidates.add((px - rw, y))
-                    candidates.add((px + pw, y))
-
-            if not candidates:
-                for x in range(min_x, max_x, snap_grid * 4):
-                    for y in range(min_y, max_y, snap_grid * 4):
-                        candidates.add((x, y))
-
-            cand_list = list(candidates)
-            if randomize:
-                random.shuffle(cand_list)
-
-            for cx, cy in cand_list:
-                cx = (int(cx) // snap_grid) * snap_grid
-                cy = (int(cy) // snap_grid) * snap_grid
-
-                if not is_within_bounds(cx, cy, room.width, room.height, poly_pixels, min_x, max_x, min_y, max_y):
-                    continue
-                # Overlap check now correctly sees upper-floor voids projected from below
-                if is_overlap(cx, cy, room.width, room.height, floor_num, occupancy):
-                    continue
-
-                score = 0.0
-                if floor_cores:
-                    dist_to_core = min(
-                        math.sqrt((cx + room.width/2 - (fc.x + fc.width/2))**2 +
-                                  (cy + room.height/2 - (fc.y + fc.height/2))**2)
-                        for fc in floor_cores
-                    )
-                    score -= dist_to_core / 100.0
-                else:
-                    score -= math.sqrt((cx + room.width/2 - center_x)**2 +
-                                       (cy + room.height/2 - center_y)**2) / 100.0
-
-                for p in floor_placed:
-                    p_code = get_shortcode(p.category)
-                    weight = adjacency_matrix.get(room_code, {}).get(p_code, 1.0)
-                    dx = max(0, cx - (p.x + p.width), p.x - (cx + room.width))
-                    dy = max(0, cy - (p.y + p.height), p.y - (cy + room.height))
-                    if dx == 0 and dy == 0:
-                        score += weight * 15
-                    elif dx < 40 and dy < 40:
-                        score += weight * 3
-
-                    neighbour_struct = get_struct_type(p.category)
-                    room_struct      = get_struct_type(room.category)
-                    struct_adjacency = {
-                        ("C1", "C2A"), ("C2A", "C1"),
-                        ("C2A", "C2B"), ("C2B", "C2A"),
-                        ("C2B", "C3"), ("C3", "C2B"),
-                        ("C3", "C4"), ("C4", "C3"),
-                    }
-                    if (room_struct, neighbour_struct) in struct_adjacency and (dx == 0 or dy == 0):
-                        score += 5.0 
-
-                if score > best_score:
-                    best_score = score
-                    best_pos = (cx, cy)
-
-            if not best_pos:
-                for x in range(min_x, max_x, snap_grid):
-                    for y in range(min_y, max_y, snap_grid):
-                        if (is_within_bounds(x, y, room.width, room.height, poly_pixels, min_x, max_x, min_y, max_y)
-                                and not is_overlap(x, y, room.width, room.height, floor_num, occupancy)):
-                            best_pos = (x, y)
-                            break
-                    if best_pos:
+        # --- Lobby: a single shared entrance. Park it flush against the most
+        # central core so Public Buffer Zone rooms can cluster by it. ---
+        lobby_center = None
+        floor_core_rooms = [r for r in placed_rooms if r.floor == floor_num and "Core" in r.category]
+        for lobby in lobbies:
+            anchor_core = min(floor_core_rooms,
+                              key=lambda c: math.hypot(c.x + c.width / 2 - center_x,
+                                                       c.y + c.height / 2 - center_y),
+                              default=None)
+            placed_lobby = False
+            if anchor_core is not None:
+                ccx = anchor_core.x + anchor_core.width / 2
+                for lx, ly in [(anchor_core.x, anchor_core.y + anchor_core.height),
+                               (anchor_core.x, anchor_core.y - lobby.height),
+                               (anchor_core.x + anchor_core.width, anchor_core.y),
+                               (anchor_core.x - lobby.width, anchor_core.y)]:
+                    lx = (int(lx) // snap_grid) * snap_grid
+                    ly = (int(ly) // snap_grid) * snap_grid
+                    if within_site(lx, ly, lobby.width, lobby.height) and not is_overlap(lx, ly, lobby.width, lobby.height, floor_num, occupancy):
+                        lobby.x, lobby.y, lobby.pinned = lx, ly, False
+                        occupancy[floor_num].append((lx, ly, lobby.width, lobby.height))
+                        placed_rooms.append(lobby)
+                        lobby_center = (lx + lobby.width / 2, ly + lobby.height / 2)
+                        placed_lobby = True
                         break
+            if not placed_lobby:
+                lobby_center = (center_x, center_y)
 
-            if best_pos:
-                room.x, room.y = best_pos
-                
-                # PROJECT VOIDS UPWARDS
-                num_floors = int(max(1, round(room.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
-                for f in range(room.floor, room.floor + num_floors):
-                    occupancy[f].append((room.x, room.y, room.width, room.height))
-                
-                placed_rooms.append(room)
+        # ============================================================
+        # CLUSTERED MASSING  (compound-colliders circulation)
+        # Each core anchors one compact building mass. Every mass gets a 2 m
+        # corridor spine placed FIRST, hard up against its core (Core<->Corridor
+        # is the strongest adjacency), then the communal + residential rooms
+        # pack along that core/corridor spine. Result: several distinct masses,
+        # each a core wired to a corridor with rooms hanging off it.
+        # ============================================================
+        floor_cores = [r for r in placed_rooms if r.floor == floor_num and "Core" in r.category]
+
+        clusters = [{"core": c, "anchor": (c.x + c.width / 2, c.y + c.height / 2),
+                     "spines": [], "rooms": [], "placed": [c]}
+                    for c in floor_cores]
+        if not clusters:
+            # No core on this floor: fall back to a single mass centred on site.
+            clusters = [{"core": None, "anchor": (center_x, center_y),
+                         "spines": [], "rooms": [], "placed": []}]
+
+        # Give each mass a corridor spine (round-robin over the cores).
+        for idx, cor in enumerate(corridors):
+            clusters[idx % len(clusters)]["spines"].append(cor)
+
+        # Public Buffer Zone rooms belong by the single lobby, so route them all
+        # to the mass nearest the lobby; everything else spreads round-robin so
+        # the masses stay roughly balanced in size.
+        buffers = [r for r in communals if "Buffer" in r.category]
+        others  = [r for r in communals if "Buffer" not in r.category] + residential
+        if randomize:
+            random.shuffle(others)
+        else:
+            others.sort(key=lambda r: -(r.width * r.height))
+        for idx, room in enumerate(others):
+            clusters[idx % len(clusters)]["rooms"].append(room)
+
+        lobby_cluster = clusters[0]
+        if lobby_center is not None and clusters[0]["core"] is not None:
+            lobby_cluster = min(clusters, key=lambda cl: math.hypot(cl["anchor"][0] - lobby_center[0],
+                                                                    cl["anchor"][1] - lobby_center[1]))
+        # Let the lobby act as circulation its mass's buffer rooms can attach to.
+        for lb in [r for r in placed_rooms if r.floor == floor_num and "Lobby" in r.category]:
+            if lb not in lobby_cluster["placed"]:
+                lobby_cluster["placed"].append(lb)
+        for room in buffers:
+            lobby_cluster["rooms"].append(room)
+
+        # Pack each mass as a COMPACT BLOCK: rooms in a tight grid centred on the
+        # core, threaded by parallel corridors (a comb) so the footprint stays
+        # square-ish (not a long thin slab) and every room still sits flush against
+        # a corridor. Courtyard leaves a central block of cells open as a court.
+        corridor_thick = 2 * snap_grid       # 2 m wide
+
+        def place_room(room, x, y):
+            x = (int(x) // snap_grid) * snap_grid
+            y = (int(y) // snap_grid) * snap_grid
+            if not within_site(x, y, room.width, room.height):
+                return False
+            if is_overlap(x, y, room.width, room.height, floor_num, occupancy):
+                return False
+            room.x, room.y = x, y
+            nf = int(max(1, round(room.floor_height / FLOOR_TO_FLOOR_HEIGHT)))
+            for f in range(room.floor, room.floor + nf):
+                occupancy[f].append((x, y, room.width, room.height))
+            placed_rooms.append(room)
+            return True
+
+        def place_anywhere(room):
+            for gx in range(min_x, max_x, snap_grid):
+                for gy in range(min_y, max_y, snap_grid):
+                    if place_room(room, gx, gy):
+                        return True
+            return False
+
+        # Corridors are drawn from a shared pool of the floor's corridor rooms;
+        # extra segments are cloned from a template so the comb can always reach
+        # every room.
+        corridor_pool = list(corridors)
+        corridor_template = corridors[0] if corridors else None
+        corr_n = [0]
+
+        def lay_corridor(x, y, w, h):
+            if w < snap_grid or h < snap_grid:
+                return
+            if corridor_pool:
+                c = corridor_pool.pop()
+            elif corridor_template is not None:
+                corr_n[0] += 1
+                c = corridor_template.model_copy(update={"id": f"AutoCorr-{floor_num}-{corr_n[0]}"})
+            else:
+                return
+            c.x = (int(x) // snap_grid) * snap_grid
+            c.y = (int(y) // snap_grid) * snap_grid
+            c.width = max(snap_grid, int(w))
+            c.height = max(snap_grid, int(h))
+            c.pinned, c.rotation = False, 0
+            occupancy[floor_num].append((c.x, c.y, c.width, c.height))
+            placed_rooms.append(c)
+
+        def pack_comb(rms, cx_c, cy_c, court=False):
+            rms = sorted(rms, key=lambda r: (0 if "Buffer" in r.category else 1, -(r.width * r.height)))
+            if randomize:
+                random.shuffle(rms)
+            n = len(rms)
+            if n == 0:
+                return
+            cw = max(r.width for r in rms)
+            ch = max(r.height for r in rms)
+            cols = max(1, int(round(math.sqrt(n))) + (1 if court else 0))
+
+            # Central reserved cells: a court (courtyard) or a single cell for the core.
+            def reserved(rows):
+                if court and rows >= 3 and cols >= 3:
+                    return max(1, cols // 3), max(1, rows // 3)
+                # Reserve a 2-wide centre for the core + lobby so grid rooms don't
+                # collide with them and get bumped off the corridor.
+                return (min(2, cols), 1) if (rows >= 2 and cols >= 2) else (0, 0)
+
+            rows = max(1, (n + cols - 1) // cols)
+            while True:
+                rc, rr = reserved(rows)
+                if cols * rows - rc * rr >= n:
+                    break
+                rows += 1
+            rc, rr = reserved(rows)
+            res_c0, res_r0 = (cols - rc) // 2, (rows - rr) // 2
+
+            # Vertical layout: corridor, (room-row, room-row), corridor, ... centred.
+            # Top rows of a pair touch the corridor ABOVE (top-aligned), bottom rows
+            # touch the corridor BELOW (bottom-aligned), so even short rooms stay flush.
+            band_y, corr_y, row_kind = [], [], []
+            y = 0.0
+            corr_y.append(y); y += corridor_thick
+            ri = 0
+            while ri < rows:
+                band_y.append(y); row_kind.append("top"); y += ch; ri += 1
+                if ri < rows:
+                    band_y.append(y); row_kind.append("bottom"); y += ch; ri += 1
+                corr_y.append(y); y += corridor_thick
+            block_w = cols * cw
+            left = cx_c - block_w / 2.0
+            top = cy_c - y / 2.0
+
+            cells = []
+            for r in range(rows):
+                for c in range(cols):
+                    if rr > 0 and res_r0 <= r < res_r0 + rr and res_c0 <= c < res_c0 + rc:
+                        continue
+                    cells.append((r, c))
+
+            for room, (r, c) in zip(rms, cells):
+                rx = left + c * cw
+                ry = top + band_y[r] if row_kind[r] == "top" else top + band_y[r] + ch - room.height
+                if not place_room(room, rx, ry):
+                    place_anywhere(room)
+
+            # Drop a green court into the reserved central cells (courtyard typology).
+            if court and rr > 0 and corridor_template is not None:
+                gx = (int(left + res_c0 * cw) // snap_grid) * snap_grid
+                gy = (int(top + band_y[res_r0]) // snap_grid) * snap_grid
+                gw = max(snap_grid, int(rc * cw))
+                gh = max(snap_grid, int(band_y[min(res_r0 + rr - 1, len(band_y) - 1)] + ch - band_y[res_r0]))
+                if within_site(gx, gy, gw, gh):
+                    court_room = corridor_template.model_copy(update={
+                        "id": f"AutoCourt-{floor_num}",
+                        "category": "Public Buffer Zone - Garden",
+                        "x": gx, "y": gy, "width": gw, "height": gh,
+                        "bgColor": "#7d8a6a", "borderColor": "#5d6a4d",
+                        "pinned": False, "rotation": 0,
+                    })
+                    occupancy[floor_num].append((gx, gy, gw, gh))
+                    placed_rooms.append(court_room)
+
+            for cyb in corr_y:
+                lay_corridor(left, top + cyb, block_w, corridor_thick)
+
+        if layout_type == "courtyard":
+            # One central ring of rooms around an open green court.
+            all_rooms = [r for cl in clusters for r in cl["rooms"]]
+            pack_comb(all_rooms, center_x, center_y, court=True)
+        else:
+            for cluster in clusters:
+                core = cluster["core"]
+                if core is not None:
+                    pack_comb(cluster["rooms"], core.x + core.width / 2, core.y + core.height / 2)
+                else:
+                    pack_comb(cluster["rooms"], center_x, center_y)
+            # Extra spines for this mass are dropped (not returned).
 
     # 3. Daylight Scoring Heuristic
     for room in placed_rooms:
