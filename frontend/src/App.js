@@ -1,18 +1,20 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useMemo, useEffect, Suspense } from 'react';
 import { Rnd } from 'react-rnd';
 import * as THREE from 'three';
-import { Canvas, useThree } from '@react-three/fiber';
-import { OrbitControls, Edges, Line } from '@react-three/drei';
+import { Canvas, useThree, useFrame } from '@react-three/fiber';
+import { OrbitControls, Edges, Line, useGLTF, Clone, ContactShadows, OrthographicCamera } from '@react-three/drei';
 import ForceGraph2D from 'react-force-graph-2d';
-import html2canvas from 'html2canvas';
 import UNIT_WALLS from './unitWalls';
+import { getRoomModel, MODEL_URLS } from './roomModels';
+
+// Preload any registered GLB room models so they pop in instantly when toggled on.
+MODEL_URLS.forEach((url) => useGLTF.preload(url));
 
 // ============================================
 // CONSTANTS & CONFIG
 // ============================================
 const GRID_SIZE = 20;
 const SUBGRID_SIZE = 20; // Exactly 1x1m internal snapping
-const CAMERA_SETTINGS = { position: [0, 80, 80], fov: 40 };
 const PIXELS_PER_METER = 20;
 const FLOOR_TO_FLOOR_HEIGHT = 3.0;
 // Green areas / gardens render as a thin 20cm green ground plane (vs. the 3m walls),
@@ -64,11 +66,37 @@ function getRoomStructType(category) {
 }
 
 // Monochrome (greys + white) palette with maroon-red accents for emphasis.
-const COLORS = {
+// Two palettes. LIGHT is the original (unchanged); DARK mirrors it with the same
+// roles so every inline style themes automatically. Accent stays in the brand
+// maroon family, lightened in dark mode so it reads against dark surfaces.
+const LIGHT = {
   bgDark: '#f1f3f5', bgMedium: '#e4e7ea', bgLight: '#ffffff',
   borderDark: '#b9bfc5', borderMedium: '#d3d8dd', borderLight: '#eaedf0',
   textPrimary: '#23282d', textSecondary: '#5f676e', textTertiary: '#969da4',
   accent: '#4f1717', accentDark: '#360f0f',
+};
+const DARK = {
+  bgDark: '#15171a', bgMedium: '#1d2024', bgLight: '#23262b',
+  borderDark: '#3b4046', borderMedium: '#31353a', borderLight: '#2a2e33',
+  textPrimary: '#e9ebed', textSecondary: '#a6acb3', textTertiary: '#717880',
+  accent: '#b65c54', accentDark: '#8f433c',
+};
+
+// Active palette — mutated IN PLACE on theme switch (it's the same object reference
+// everywhere) so a re-render repaints all inline styles that read COLORS.* .
+const COLORS = { ...LIGHT };
+const applyTheme = (mode) => Object.assign(COLORS, mode === 'dark' ? DARK : LIGHT);
+
+// Editorial UI primitives — shared chrome for an architectural, magazine-like feel.
+// Defined as getters so each access recomputes against the CURRENT COLORS (theme).
+const UI = {
+  get ribbon()       { return { display: 'flex', alignItems: 'stretch', justifyContent: 'space-between', background: COLORS.bgLight, borderBottom: `1px solid ${COLORS.borderDark}`, padding: '0 32px', height: '66px', flexShrink: 0, zIndex: 999 }; },
+  get sectionLabel() { return { fontSize: '10px', fontWeight: '600', letterSpacing: '1.6px', textTransform: 'uppercase', color: COLORS.textTertiary, margin: '0 0 14px 0', paddingBottom: '8px', borderBottom: `1px solid ${COLORS.borderLight}` }; },
+  get microLabel()   { return { fontSize: '9px', fontWeight: '600', letterSpacing: '1.4px', textTransform: 'uppercase', color: COLORS.textTertiary, whiteSpace: 'nowrap' }; },
+  get field()        { return { padding: '8px 10px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '2px', fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '12px', letterSpacing: '0.3px' }; },
+  get ghostBtn()     { return { padding: '9px 16px', background: 'transparent', color: COLORS.textPrimary, border: `1px solid ${COLORS.borderDark}`, borderRadius: '2px', cursor: 'pointer', fontWeight: '600', fontSize: '10px', letterSpacing: '1.2px', textTransform: 'uppercase' }; },
+  get primaryBtn()   { return { padding: '9px 22px', background: COLORS.accent, color: '#ffffff', border: `1px solid ${COLORS.accent}`, borderRadius: '2px', cursor: 'pointer', fontWeight: '600', fontSize: '10px', letterSpacing: '1.2px', textTransform: 'uppercase' }; },
+  get vRule()        { return { width: '1px', alignSelf: 'center', height: '34px', background: COLORS.borderMedium }; },
 };
 
 const getSemanticColor = (category) => {
@@ -285,6 +313,29 @@ const communalComponents = {
 
 const residentialComponents = ["Studio", "1 Bedroom", "2 Bedroom", "3 Bedroom", "4 Bedroom"];
 
+// Residential unit mix for ONE floor given a resident count + demographic. Returns
+// [category, item, catalogVariant] descriptors so they can be spawned on any floor.
+// Mirrors the Auto-Populate ratios; used by the multi-floor "Auto Configure" flow.
+// `rv(name)` picks a random catalog variant for a unit type.
+const residentialProgrammeDescriptors = (pop, user, rv) => {
+  const out = [];
+  const push = (item, n) => { for (let i = 0; i < n; i++) out.push(["Residential Unit", item, rv(item)]); };
+  if (user === 'Students') {
+    const s = Math.floor(pop * 0.4);
+    push("Studio", Math.ceil(s)); push("4 Bedroom", Math.ceil((pop - s) / 4));
+  } else if (user === 'Young Professional') {
+    const s = Math.floor(pop * 0.3), o = Math.floor(pop * 0.4);
+    push("Studio", Math.ceil(s)); push("1 Bedroom", Math.ceil(o / 2)); push("2 Bedroom", Math.ceil((pop - s - o) / 3));
+  } else if (user === 'Family') {
+    const tw = Math.floor(pop * 0.4);
+    push("2 Bedroom", Math.ceil(tw / 3)); push("3 Bedroom", Math.ceil((pop - tw) / 4));
+  } else { // Mix
+    const s = Math.floor(pop * 0.25), o = Math.floor(pop * 0.35), t = Math.floor(pop * 0.25);
+    push("Studio", Math.ceil(s)); push("1 Bedroom", Math.ceil(o / 2)); push("2 Bedroom", Math.ceil(t / 3)); push("3 Bedroom", Math.ceil((pop - s - o - t) / 4));
+  }
+  return out;
+};
+
 // ============================================
 // 3D COMPONENTS
 // ============================================
@@ -292,6 +343,55 @@ const SceneCapturer = ({ sceneRef }) => {
   const { scene } = useThree();
   useEffect(() => { sceneRef.current = scene; }, [scene, sceneRef]);
   return null;
+};
+
+// Parallel (orthographic / axonometric) camera. Fixed corner views NE/NW/SE/SW, plus
+// an optional auto-orbit turntable. Scroll zoom is fed in via `zoom`. Far lighter than
+// free orbit/pan controls.
+const AXO_POSITIONS = {
+  NE: [150, 120, 150], NW: [-150, 120, 150], SE: [150, 120, -150], SW: [-150, 120, -150],
+};
+const AXO_RADIUS = 212, AXO_HEIGHT = 120;
+// Place an ortho camera at base looking at target, then offset BOTH by a screen-plane
+// pan (in pixels, converted to world units via zoom) so left-drag slides the view.
+const placeAxo = (c, base, target, zoom, pan) => {
+  c.up.set(0, 1, 0);
+  c.position.set(base[0], base[1], base[2]);
+  c.zoom = zoom;
+  c.lookAt(target[0], target[1], target[2]);
+  c.updateMatrixWorld();
+  const right = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld, 0).normalize();
+  const up = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld, 1).normalize();
+  const k = 1 / (zoom || 1);
+  const off = right.multiplyScalar(-pan.x * k).add(up.multiplyScalar(pan.y * k));
+  c.position.set(base[0] + off.x, base[1] + off.y, base[2] + off.z);
+  c.lookAt(target[0] + off.x, target[1] + off.y, target[2] + off.z);
+  c.updateProjectionMatrix();
+};
+const AxoCamera = ({ view, zoom, autoOrbit, pan }) => {
+  const ref = useRef();
+  // Seed the orbit angle from the chosen corner so it starts where you were looking.
+  const angle = useRef(Math.PI / 4);
+
+  // Fixed corner placement (runs when not orbiting, or when view/zoom/pan changes).
+  useEffect(() => {
+    const c = ref.current;
+    if (!c || autoOrbit) return;
+    const p = AXO_POSITIONS[view] || AXO_POSITIONS.NE;
+    angle.current = Math.atan2(p[2], p[0]);
+    placeAxo(c, p, [0, 16, 0], zoom, pan);
+  }, [view, zoom, autoOrbit, pan]);
+
+  // Auto-orbit turntable + live zoom/pan while orbiting.
+  useFrame((_, delta) => {
+    const c = ref.current;
+    if (!c || !autoOrbit) return;
+    angle.current += delta * 0.35;
+    const base = [Math.cos(angle.current) * AXO_RADIUS, AXO_HEIGHT, Math.sin(angle.current) * AXO_RADIUS];
+    placeAxo(c, base, [0, 16, 0], zoom, pan);
+  });
+
+  return <OrthographicCamera ref={ref} makeDefault near={-1000} far={2000} />;
 };
 
 const Boundary3D = ({ boundary, scale }) => {
@@ -474,6 +574,107 @@ const ModularMesh = ({ room, scale, boundary }) => {
   );
 };
 
+// Renders a room as its imported Rhino GLB model (furnished). The model is authored
+// in metres, +Y up, footprint centred on its origin with its base on the ground, so
+// it drops in at native scale (1 unit = 1 m) — only positioned, rotated about the
+// vertical axis (room.rotation), and stacked per floor. Falls back handled by caller.
+const RoomModel = ({ room, scale, boundary, model }) => {
+  const { scene } = useGLTF(model.url);
+
+  const cx = boundary?.metadata?.alignment_centroid?.[0] || 400;
+  const cy = boundary?.metadata?.alignment_centroid?.[1] || 300;
+
+  const x = (room.x + room.width  / 2 - cx) / scale;
+  const z = (room.y + room.height / 2 - cy) / scale;
+  const y = (room.floor - 1) * FLOOR_TO_FLOOR_HEIGHT + (model.yOffset || 0);
+
+  // Vertical-axis rotation only (model is already upright). room.rotation is degrees.
+  const yaw = -(room.rotation * Math.PI) / 180 + (model.yaw || 0);
+
+  return (
+    <group position={[x, y, z]} rotation={[0, yaw, 0]} name={room.category}>
+      <Clone object={scene} castShadow receiveShadow />
+    </group>
+  );
+};
+
+// Spinnable 3D preview of a room's imported GLB, shown inside the catalog browse
+// popup (and the in-pane expanded viewer). Keeps the model's real textures/materials,
+// but furniture that authored as (near-)black & untextured is recoloured WHITE so it
+// doesn't read as a dark blob.
+const CatalogModelInner = ({ url }) => {
+  const { scene } = useGLTF(url);
+  const prepared = useMemo(() => {
+    const clone = scene.clone(true);
+    const fix = (m) => {
+      const nm = m.clone();
+      // Only touch plain dark materials (no colour texture) — keep all real textures.
+      if (!nm.map && nm.color) {
+        const lum = 0.299 * nm.color.r + 0.587 * nm.color.g + 0.114 * nm.color.b;
+        if (lum < 0.18) nm.color.set('#ffffff');
+      }
+      return nm;
+    };
+    clone.traverse((o) => {
+      if (o.isMesh && o.material) {
+        o.material = Array.isArray(o.material) ? o.material.map(fix) : fix(o.material);
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    return clone;
+  }, [scene]);
+  return <primitive object={prepared} />;
+};
+
+// Lit, orbitable scene for a single GLB. Shared by the small inline preview and the
+// in-pane expanded viewer; `big` only changes framing / auto-rotate. Background and
+// shadow follow the active theme.
+const CatalogModelScene = ({ model, big }) => {
+  const dark = COLORS.bgLight !== '#ffffff';
+  return (
+    <Canvas shadows camera={{ position: big ? [13, 9, 13] : [11, 8, 11], fov: 45 }}>
+      <color attach="background" args={[COLORS.bgLight]} />
+      <hemisphereLight args={['#ffffff', dark ? '#1a1d21' : '#dfe2e6', 0.9]} />
+      <ambientLight intensity={0.55} />
+      <directionalLight position={[10, 16, 8]} intensity={1.3} castShadow shadow-mapSize={[1024, 1024]} />
+      <directionalLight position={[-9, 7, -6]} intensity={0.5} />
+      <Suspense fallback={null}>
+        <CatalogModelInner url={model.url} />
+        <ContactShadows position={[0, 0.01, 0]} opacity={dark ? 0.5 : 0.35} scale={20} blur={2.2} far={8} color={dark ? '#000000' : '#3a3f45'} />
+      </Suspense>
+      <OrbitControls enablePan={!!big} target={[0, (model.height || 3) / 2, 0]} autoRotate={!big} autoRotateSpeed={1.2} />
+    </Canvas>
+  );
+};
+
+const CatalogModelPreview = ({ model, onExpand }) => (
+  <div style={{ position: 'relative', width: '100%', height: '180px', background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '2px', marginBottom: '10px', overflow: 'hidden' }}>
+    <CatalogModelScene model={model} big={false} />
+    <button onClick={onExpand}
+      style={{ position: 'absolute', top: '6px', right: '6px', padding: '5px 9px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '2px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>
+      ⤢ Expand
+    </button>
+  </div>
+);
+
+// In-pane 3D viewer — fills ONLY the main middle view (absolute over it), leaving
+// the ribbon + side panels visible. Drag to orbit, scroll to zoom.
+const CatalogModelModal = ({ model, title, onBack, onSpawn }) => (
+  <div style={{ position: 'absolute', inset: 0, background: COLORS.bgLight, zIndex: 60, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 22px', borderBottom: `1px solid ${COLORS.borderMedium}` }}>
+      <div style={{ ...UI.microLabel, fontSize: '11px', color: COLORS.textPrimary }}>{title} — 3D Layout</div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button onClick={onBack} style={UI.ghostBtn}>← Back to 2D</button>
+        <button onClick={onSpawn} style={UI.primaryBtn}>＋ Spawn in 2D</button>
+      </div>
+    </div>
+    <div style={{ flex: 1, overflow: 'hidden', background: COLORS.bgLight }}>
+      <CatalogModelScene model={model} big={true} />
+    </div>
+  </div>
+);
+
 const roomLabelContainerStyle = {
   position: 'absolute', top: 0, left: 0,
   width: '100%', height: '100%',
@@ -507,10 +708,28 @@ function App() {
   const [activeFloor,         setActiveFloor]         = useState(1);
   const [activeCatalogContext,setActiveCatalogContext] = useState(null);
   const [catalogAnchorTop,    setCatalogAnchorTop]    = useState(120);
+  const [expandedModel,       setExpandedModel]       = useState(null);
+  const [theme,               setTheme]               = useState('light');
+  const [configMsg,           setConfigMsg]           = useState(null);
+  // Repaint the active palette before this render builds its inline styles.
+  applyTheme(theme);
+
+  // Auto-dismiss the Auto Configure confirmation toast after a few seconds.
+  useEffect(() => {
+    if (!configMsg) return;
+    const t = setTimeout(() => setConfigMsg(null), 6000);
+    return () => clearTimeout(t);
+  }, [configMsg]);
   const [history,             setHistory]             = useState([[]]);
   const [historyStep,         setHistoryStep]         = useState(0);
   const [targetUser,          setTargetUser]          = useState('Mix');
-  const [layoutType,          setLayoutType]          = useState('towers');
+  const [layoutType,          setLayoutType]          = useState('mat');
+  const [furnishedMode,       setFurnishedMode]       = useState(false);
+  const [axoView,             setAxoView]             = useState('NE');
+  const [axoZoomMult,         setAxoZoomMult]         = useState(1);
+  const [autoOrbit,           setAutoOrbit]           = useState(false);
+  const [axoPan,              setAxoPan]              = useState({ x: 0, y: 0 });
+  const axoDragRef = useRef(null);
   const [population,          setPopulation]          = useState(15);
   const [isCalculating,       setIsCalculating]       = useState(false);
   const [viewMode,            setViewMode]            = useState('2D');
@@ -594,6 +813,83 @@ function App() {
     }
   }, [viewMode, graphData]);
 
+  // Render a clean, high-resolution 2D floor plan straight from the room data (not a
+  // screen grab) so the export is the full layout at print quality, regardless of the
+  // current on-screen zoom/pan. Draws the site boundary, a 1 m grid, each room's true
+  // footprint (honouring rotation / flipX / shapePath) and a label.
+  const buildPlanDataUrl = (floorNum) => {
+    const poly = siteBoundary?.metadata?.polygon_pixels;
+    const floorRooms = rooms.filter(r => r.floor === floorNum);
+
+    let minX, minY, maxX, maxY;
+    if (poly && poly.length) {
+      minX = Math.min(...poly.map(p => p[0])); maxX = Math.max(...poly.map(p => p[0]));
+      minY = Math.min(...poly.map(p => p[1])); maxY = Math.max(...poly.map(p => p[1]));
+    } else if (floorRooms.length) {
+      minX = Math.min(...floorRooms.map(r => r.x)); maxX = Math.max(...floorRooms.map(r => r.x + r.width));
+      minY = Math.min(...floorRooms.map(r => r.y)); maxY = Math.max(...floorRooms.map(r => r.y + r.height));
+    } else { minX = 0; minY = 0; maxX = 800; maxY = 600; }
+
+    const pad = GRID_SIZE * 2;
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    const wPx = maxX - minX, hPx = maxY - minY;
+    // High-res, but cap the longest side so very large sites don't blow up memory.
+    const SCALE = Math.max(1, Math.min(3, 5000 / Math.max(wPx, hPx)));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(wPx * SCALE);
+    canvas.height = Math.round(hPx * SCALE);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(SCALE, SCALE);
+    ctx.translate(-minX, -minY);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(minX, minY, wPx, hPx);
+
+    // 1 m grid
+    ctx.strokeStyle = '#eaedf0'; ctx.lineWidth = 0.5;
+    for (let gx = Math.ceil(minX / GRID_SIZE) * GRID_SIZE; gx <= maxX; gx += GRID_SIZE) { ctx.beginPath(); ctx.moveTo(gx, minY); ctx.lineTo(gx, maxY); ctx.stroke(); }
+    for (let gy = Math.ceil(minY / GRID_SIZE) * GRID_SIZE; gy <= maxY; gy += GRID_SIZE) { ctx.beginPath(); ctx.moveTo(minX, gy); ctx.lineTo(maxX, gy); ctx.stroke(); }
+
+    // Site boundary
+    if (poly && poly.length) {
+      ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      poly.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.closePath(); ctx.stroke();
+    }
+
+    // Rooms (true footprint with rotation / flipX / shapePath)
+    floorRooms.forEach(room => {
+      const pts = (room.shapePath || '0,0 100,0 100,100 0,100').trim().split(/\s+/).map(s => s.split(',').map(Number));
+      const cx = room.x + room.width / 2, cy = room.y + room.height / 2;
+      const rad = ((room.rotation || 0) * Math.PI) / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      const tp = pts.map(([px, py]) => {
+        let lx = (px / 100 - 0.5) * room.width;
+        const ly = (py / 100 - 0.5) * room.height;
+        if (room.flipX) lx = -lx;
+        return [cx + (lx * cos - ly * sin), cy + (lx * sin + ly * cos)];
+      });
+      ctx.beginPath();
+      tp.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.closePath();
+      ctx.fillStyle = room.bgColor || 'rgba(150,150,150,0.4)';
+      ctx.fill();
+      ctx.strokeStyle = room.borderColor || '#666666';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      const name = (room.category || '').split(' - ')[1] || room.category || '';
+      ctx.fillStyle = '#23282d';
+      ctx.font = "600 9px 'Jost', sans-serif";
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(name, cx, cy);
+    });
+
+    return canvas.toDataURL('image/png');
+  };
+
   const handleRightClickExport = async (e, viewModeStr, floorNum = 1) => {
     if (e.defaultPrevented) return;
     e.preventDefault();
@@ -606,17 +902,23 @@ function App() {
         if (canvas) { dataUrl = canvas.toDataURL('image/png'); filename = 'Graph_Topology_View.png'; }
       } else if (viewModeStr === '3D') {
         const canvas = document.getElementById('view-3d')?.querySelector('canvas');
-        if (canvas) { dataUrl = canvas.toDataURL('image/png'); filename = '3D_Massing_View.png'; }
-      } else if (viewModeStr === '2D') {
-        const element = document.getElementById(`view-2d-${floorNum}`);
-        if (element) {
-          element.querySelectorAll('.no-export').forEach(el => el.style.display = 'none');
-          setSelectedRoomId(null);
-          const canvas = await html2canvas(element, { backgroundColor: COLORS.bgLight, useCORS: true });
-          element.querySelectorAll('.no-export').forEach(el => el.style.display = '');
+        if (canvas) {
+          // Exports are the BOX massing only — the furnished GLBs are preview-only. If
+          // Furnished is on, switch to boxes for the capture, then restore it.
+          const wasFurnished = furnishedMode;
+          if (wasFurnished) {
+            setFurnishedMode(false);
+            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          }
           dataUrl = canvas.toDataURL('image/png');
-          filename = `2D_Plan_Floor_${floorNum}.png`;
+          filename = '3D_Massing_View.png';
+          if (wasFurnished) setFurnishedMode(true);
         }
+      } else if (viewModeStr === '2D') {
+        // Proper high-res plan rendered from the data — not a screen grab.
+        dataUrl = buildPlanDataUrl(floorNum);
+        filename = `2D_Plan_Floor_${floorNum}.png`;
       }
       if (dataUrl) setExportMenu({ visible: true, x: e.clientX, y: e.clientY, imageData: dataUrl, fileName: filename });
     } catch (err) {
@@ -741,6 +1043,14 @@ function App() {
       calculatedArea = getCalculatedRoomAreaM2(startWidth, startHeight, itemName, COMMUNAL_GW_GH, GRID_SIZE);
     }
 
+    // If this room type has an imported furnished model, size the room to the model's
+    // real footprint so the GLB fits 1:1 (no stretching) in the 3D view.
+    const roomModel = getRoomModel(fullCategory, variant);
+    if (roomModel?.size) {
+      startWidth  = roomModel.size[0] * GRID_SIZE;
+      startHeight = roomModel.size[1] * GRID_SIZE;
+    }
+
     const colorMap = {
       'Residential Unit':  { bg: 'rgba(110, 36, 36, 0.38)',  border: '#6e2424' },
       'Circulation':       { bg: 'rgba(154, 150, 144, 0.30)', border: '#9a9690' },
@@ -847,9 +1157,9 @@ function App() {
       }
     }
 
-    // One central core per floor: rooms pack into a single compact block around
-    // it (the backend threads it with a comb of corridors). Towers express height
-    // by stacking floors rather than spreading footprints across the site.
+    // One central core per floor. The backend compound-colliders solver pulls the
+    // rooms toward this core (mat) or a ring around the site centre (courtyard) and
+    // wraps corridors around the resulting cluster.
     addRoom("Circulation", "Core");
     for (let c = 0; c < 4; c++) addRoom("Circulation", "Corridor");
 
@@ -862,43 +1172,47 @@ function App() {
       addRoom("Private Communal", "Game Room"); addRoom("Private Communal", "Workspace Room");
     }
 
-    // Point Towers stack residents vertically: spread the residential units over
-    // several floors and clone the cores + corridors onto each floor so every
-    // tower rises through all of them. Lobby / communal / buffer stay on ground.
-    if (layoutType === 'towers') {
-      const numFloors = Math.min(6, Math.max(2, Math.round(remainingPop / 14)));
-      if (numFloors > 1) {
-        const resUnits = newRooms.filter(r => (r.category || '').startsWith('Residential'));
-        const circ     = newRooms.filter(r => /Core|Corridor/.test(r.category || ''));
-        resUnits.forEach((r, i) => { r.floor = (i % numFloors) + 1; });
-        for (let f = 2; f <= numFloors; f++) {
-          circ.forEach(src => newRooms.push({ ...src, id: `${src.id}-f${f}`, floor: f }));
-        }
-        setFloors(Array.from({ length: numFloors }, (_, i) => i + 1));
-      }
-    }
-
     updateRoomsWithHistory([...rooms, ...newRooms]);
   };
 
-  // Fill leftover ground-floor space (inside the site boundary, not covered by any room)
-  // with low green-area tiles. Scans a 2m grid and merges free cells into horizontal strips.
-  const handleFillGreen = () => {
+  // Compute green-area tiles for the ground floor — ONLY the enclosed interior space
+  // WITHIN the building (courtyards / atria surrounded by rooms), not the open site.
+  // A 2 m grid is flood-filled from outside through free cells; any free cell the
+  // outside can't reach is interior → green. Interior cells are merged into strips.
+  const computeGroundGreenFill = (occupants) => {
     const GF = 1;
     const cell = GRID_SIZE * 2; // 2m
-    const poly = siteBoundary?.metadata?.polygon_pixels;
-    const minX = Math.ceil(siteBoundary.minX), maxX = Math.floor(siteBoundary.maxX);
-    const minY = Math.ceil(siteBoundary.minY), maxY = Math.floor(siteBoundary.maxY);
-    const occ = rooms
+    const occ = occupants
       .filter(r => r.floor === GF && !(r.category || '').includes('Green'))
       .map(r => [r.x, r.y, r.width, r.height]);
+    if (occ.length === 0) return [];
 
-    const inBounds = (x, y) => (poly && poly.length ? pointInPolygon(x, y, poly) : (x >= minX && y >= minY && x <= maxX && y <= maxY));
-    const isFree = (x, y, w, h) => {
-      const pts = [[x, y], [x + w, y], [x, y + h], [x + w, y + h], [x + w / 2, y + h / 2]];
-      if (!pts.every(([px, py]) => inBounds(px, py))) return false;
-      return !occ.some(([ox, oy, ow, oh]) => !(x + w <= ox || ox + ow <= x || y + h <= oy || oy + oh <= y));
+    // Grid over the building bbox, with a 1-cell margin so "outside" can wrap around it.
+    const bMinX = Math.min(...occ.map(o => o[0])) - cell;
+    const bMinY = Math.min(...occ.map(o => o[1])) - cell;
+    const bMaxX = Math.max(...occ.map(o => o[0] + o[2])) + cell;
+    const bMaxY = Math.max(...occ.map(o => o[1] + o[3])) + cell;
+    const cols = Math.ceil((bMaxX - bMinX) / cell);
+    const rows = Math.ceil((bMaxY - bMinY) / cell);
+
+    const occupiedCell = (c, r) => {
+      const x = bMinX + c * cell + cell / 2, y = bMinY + r * cell + cell / 2;
+      return occ.some(([ox, oy, ow, oh]) => x >= ox && x <= ox + ow && y >= oy && y <= oy + oh);
     };
+    const grid = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => occupiedCell(c, r) ? 1 : 0));
+
+    // Flood-fill "outside" from the border free cells (4-connectivity).
+    const outside = Array.from({ length: rows }, () => new Array(cols).fill(false));
+    const stack = [];
+    for (let c = 0; c < cols; c++) { if (grid[0][c] === 0) stack.push([0, c]); if (grid[rows - 1][c] === 0) stack.push([rows - 1, c]); }
+    for (let r = 0; r < rows; r++) { if (grid[r][0] === 0) stack.push([r, 0]); if (grid[r][cols - 1] === 0) stack.push([r, cols - 1]); }
+    while (stack.length) {
+      const [r, c] = stack.pop();
+      if (r < 0 || c < 0 || r >= rows || c >= cols || outside[r][c] || grid[r][c] === 1) continue;
+      outside[r][c] = true;
+      stack.push([r + 1, c], [r - 1, c], [r, c + 1], [r, c - 1]);
+    }
+
     const makeGreen = (x, y, w, h) => ({
       id: `Green Area (${Math.floor(Math.random() * 100000)})`,
       category: 'Green Area - Garden', floor: GF, x, y, width: w, height: h,
@@ -908,24 +1222,24 @@ function App() {
       rotation: 0, flipX: false, pinned: true, floor_height: GREEN_AREA_HEIGHT, struct_type: 'C2B',
     });
 
+    // Interior free cells (free AND not reachable from outside) → green; merge per row.
     const greens = [];
-    for (let y = minY; y + cell <= maxY; y += cell) {
+    for (let r = 0; r < rows; r++) {
       let runStart = null;
-      for (let x = minX; x + cell <= maxX; x += cell) {
-        const free = isFree(x, y, cell, cell);
-        if (free && runStart === null) runStart = x;
-        if (!free && runStart !== null) {
-          if (x - runStart >= cell) greens.push(makeGreen(runStart, y, x - runStart, cell));
-          runStart = null;
-        }
+      for (let c = 0; c < cols; c++) {
+        const interior = grid[r][c] === 0 && !outside[r][c];
+        if (interior && runStart === null) runStart = c;
+        if (!interior && runStart !== null) { greens.push(makeGreen(bMinX + runStart * cell, bMinY + r * cell, (c - runStart) * cell, cell)); runStart = null; }
       }
-      if (runStart !== null) {
-        const end = minX + Math.floor((maxX - minX) / cell) * cell;
-        if (end - runStart >= cell) greens.push(makeGreen(runStart, y, end - runStart, cell));
-      }
+      if (runStart !== null) greens.push(makeGreen(bMinX + runStart * cell, bMinY + r * cell, (cols - runStart) * cell, cell));
     }
-    if (greens.length === 0) { alert("No leftover ground-floor space to fill."); return; }
-    const without = rooms.filter(r => !((r.category || '').includes('Green') && r.floor === GF));
+    return greens;
+  };
+
+  const handleFillGreen = () => {
+    const greens = computeGroundGreenFill(rooms);
+    if (greens.length === 0) { alert("No enclosed interior space (courtyard) to fill with green."); return; }
+    const without = rooms.filter(r => !((r.category || '').includes('Green') && r.floor === 1));
     updateRoomsWithHistory([...without, ...greens]);
   };
 
@@ -951,6 +1265,78 @@ function App() {
         setRules(data.rules);
         const maxFloor = Math.max(...data.rooms.map(r => r.floor));
         if (maxFloor > floors.length) setFloors(Array.from({ length: maxFloor }, (_, i) => i + 1));
+      }
+    } catch {
+      alert("Backend error. Make sure Python server is running on http://127.0.0.1:8000");
+    }
+    setIsCalculating(false);
+  };
+
+  // AUTO CONFIGURE — full multi-floor massing. Unlike Auto-Layout (which solves the
+  // rooms the user placed, per floor), this AUTO-DECIDES the resident count and floor
+  // count from the site area + selected typology, builds every floor's programme, then
+  // runs the solver across all floors in one pass. Replaces the current scheme.
+  const handleAutoConfigure = async () => {
+    setIsCalculating(true);
+    setRules([]); setSelectedRoomId(null);
+    try {
+      const b = siteBoundary;
+      const pxArea = (b.maxX - b.minX) * (b.maxY - b.minY);
+      const siteAreaM2 = b?.metadata?.original_area_m2 || pxArea / (GRID_SIZE * GRID_SIZE);
+
+      // Floor count by typology (terraced / stacked forms want more storeys).
+      const floorByType = { mat: 2, courtyard: 3, 'grand-gotto': 5, 'swiss-cheese': 2, 'building-blocks-stack': 4 };
+      const floorCount = floorByType[layoutType] || 3;
+      // Keep the build LIGHT and the typology forms READABLE: only a modest number of
+      // units per floor so rings / quads / holes read as clean shapes (not a dense
+      // blob), and the rest of the site greens over. Capped so big sites stay sculptural.
+      const basePerFloor = Math.max(4, Math.min(24, Math.round((siteAreaM2 * 0.10) / 30)));
+
+      const newFloors = Array.from({ length: floorCount }, (_, i) => i + 1);
+      const rv = (name) => CATALOG_DATA[name][Math.floor(Math.random() * CATALOG_DATA[name].length)];
+
+      let idx = 0;
+      const allRooms = [];
+      const make = (cat, item, custom, floorN) => { const o = createRoomObject(cat, item, custom, idx++); o.floor = floorN; allRooms.push(o); };
+
+      let totalResidents = 0;
+      newFloors.forEach((f) => {
+        // Grand-gotto terraces: thin out the upper floors so the massing steps back.
+        const factor = layoutType === 'grand-gotto' ? Math.max(0.35, 1 - 0.15 * (f - 1)) : 1;
+        const pop = Math.max(3, Math.round(basePerFloor * factor));
+        totalResidents += pop;
+
+        residentialProgrammeDescriptors(pop, targetUser, rv).forEach(([cat, item, custom]) => make(cat, item, custom, f));
+
+        if (f === 1) make("Circulation", "Lobby", null, f);
+        make("Circulation", "Core", null, f);
+        for (let c = 0; c < 4; c++) make("Circulation", "Corridor", null, f);
+
+        // A little shared programme per floor (amenities on the ground, work/social above).
+        if (f === 1) { make("Public Buffer Zone", "Multipurpose Hall", null, f); make("Public Buffer Zone", "Garden", null, f); }
+        else { make("Private Communal", "Shared Kitchen", null, f); make("Private Communal", "Workspace Room", null, f); }
+      });
+
+      const response = await fetch('http://127.0.0.1:8000/api/straighten-walls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUser, activeFloor: 1, rooms: allRooms, randomize: true, boundary: siteBoundary, layoutType })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        const sorted = data.rooms
+          .map(r => isGreenSpaceCategory(r.category) ? { ...r, floor_height: GREEN_AREA_HEIGHT } : r)
+          .sort((a, b) => a.floor - b.floor);
+        // Keep ~40% of the site as green: fill the leftover ground-floor space with
+        // green tiles around the solved massing.
+        const greens = computeGroundGreenFill(sorted);
+        const finalRooms = [...sorted, ...greens];
+        setFloors(newFloors);
+        setActiveFloor(1);
+        setPopulation(totalResidents);
+        updateRoomsWithHistory(finalRooms);
+        setRules(data.rules);
+        setConfigMsg(`Generated building — ${totalResidents} residents across ${floorCount} floors (${layoutType.replace(/-/g, ' ')}), green courtyards inside the building footprint.`);
       }
     } catch {
       alert("Backend error. Make sure Python server is running on http://127.0.0.1:8000");
@@ -1253,6 +1639,9 @@ function App() {
 
   const sunPos = getLondonSolarPosition(solarMonth, solarHour);
   const alignAngleDeg = (siteBoundary.metadata.alignment_angle || 0) * (180 / Math.PI);
+  // Orthographic zoom that roughly fits the site in the axonometric 3D view.
+  const axoSpanM = Math.max(siteBoundary.maxX - siteBoundary.minX, siteBoundary.maxY - siteBoundary.minY) / GRID_SIZE;
+  const axoZoom = Math.max(3, Math.min(13, 620 / Math.max(axoSpanM, 20))) * axoZoomMult;
 
   // ============================================
   // RENDER
@@ -1291,77 +1680,105 @@ function App() {
         </div>
       )}
 
-      {/* TOP BAR */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.bgMedium, color: COLORS.textPrimary, padding: '15px 30px', borderBottom: `1px solid ${COLORS.borderMedium}`, zIndex: 999, fontSize: '14px', textTransform: 'uppercase' }}>
+      {/* TOP RIBBON */}
+      <div style={UI.ribbon}>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{ display: 'flex', gap: '5px' }}>
-            <button onClick={handleUndo} disabled={historyStep === 0} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === 0 ? 0.5 : 1 }}>↶</button>
-            <button onClick={handleRedo} disabled={historyStep === history.length - 1} style={{ padding: '8px 12px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', opacity: historyStep === history.length - 1 ? 0.5 : 1 }}>↷</button>
-          </div>
-          <h2 style={{ margin: 0, fontSize: '24px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, textTransform: 'none', whiteSpace: 'nowrap' }}>
+        {/* Brand + history */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '22px' }}>
+          <h2 style={{ margin: 0, fontSize: '24px', fontWeight: '400', letterSpacing: '0.2px', color: COLORS.textPrimary, whiteSpace: 'nowrap', alignSelf: 'center' }}>
             <span style={{ fontWeight: 700 }}>LinX</span> Massing Engine
           </h2>
+          <div style={UI.vRule} />
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button onClick={handleUndo} disabled={historyStep === 0} style={{ ...UI.ghostBtn, padding: '8px 11px', fontSize: '13px', opacity: historyStep === 0 ? 0.4 : 1 }}>↶</button>
+            <button onClick={handleRedo} disabled={historyStep === history.length - 1} style={{ ...UI.ghostBtn, padding: '8px 11px', fontSize: '13px', opacity: historyStep === history.length - 1 ? 0.4 : 1 }}>↷</button>
+          </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '30px', alignItems: 'center', background: COLORS.bgLight, padding: '5px 15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Target User:</label>
-            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
+        {/* Programme parameters */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '26px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+            <label style={UI.microLabel}>Target User</label>
+            <select value={targetUser} onChange={e => setTargetUser(e.target.value)} style={UI.field}>
               <option value="Students">Students</option>
               <option value="Young Professional">Young Professional</option>
               <option value="Family">Family</option>
               <option value="Mix">Mix</option>
             </select>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Typology:</label>
-            <select value={layoutType} onChange={e => setLayoutType(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, fontFamily: "'Jost', 'Century Gothic', 'Avenir Next', sans-serif", fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
-              <option value="towers">Point Towers</option>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+            <label style={UI.microLabel}>Typology</label>
+            <select value={layoutType} onChange={e => setLayoutType(e.target.value)} style={UI.field}>
               <option value="mat">Integrated Mat</option>
               <option value="courtyard">Courtyard Block</option>
+              <option value="grand-gotto">Grand Gotto (Terraced)</option>
+              <option value="swiss-cheese">Swiss Cheese</option>
+              <option value="building-blocks-stack">Building Blocks Stack</option>
             </select>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <label style={{ fontSize: '12px', letterSpacing: '0.5px', color: COLORS.textSecondary, fontWeight: '500', textTransform: 'uppercase' }}>Residents:</label>
-            <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ padding: '8px', borderRadius: '4px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, width: '60px', fontSize: '12px', letterSpacing: '0.5px' }} />
-            <button onClick={handleAutoPopulate} style={{ padding: '8px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Auto-Populate</button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+            <label style={UI.microLabel}>Residents — Manual Layout</label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <input type="number" value={population} onChange={e => setPopulation(e.target.value)} style={{ ...UI.field, width: '56px' }} />
+              <button onClick={handleAutoPopulate} style={UI.ghostBtn}>Auto-Populate</button>
+              <button onClick={() => handleStraighten(true)} disabled={isCalculating} title="Scatter rooms and re-solve this floor" style={{ ...UI.ghostBtn, cursor: isCalculating ? 'not-allowed' : 'pointer', opacity: isCalculating ? 0.6 : 1 }}>
+                {isCalculating ? 'Processing' : 'Randomize'}
+              </button>
+              <button onClick={() => handleStraighten(false)} disabled={isCalculating} title="Solve the rooms you placed, per floor" style={{ ...UI.primaryBtn, cursor: isCalculating ? 'not-allowed' : 'pointer', opacity: isCalculating ? 0.6 : 1 }}>
+                {isCalculating ? 'Calculating' : 'Auto-Layout'}
+              </button>
+            </div>
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '15px' }}>
-          <div style={{ display: 'flex', background: COLORS.bgMedium, borderRadius: '4px', overflow: 'hidden', border: `1px solid ${COLORS.borderMedium}` }}>
+        {/* View tabs + actions */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+          <button onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')} title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+            style={{ ...UI.ghostBtn, padding: '8px 11px', fontSize: '13px', lineHeight: 1 }}>
+            {theme === 'light' ? '☾' : '☀'}
+          </button>
+          <div style={UI.vRule} />
+          <div style={{ display: 'flex', alignSelf: 'stretch' }}>
             {['2D', '3D', 'GRAPH'].map(mode => (
-              <button key={mode} onClick={() => setViewMode(mode)} style={{ padding: '10px 20px', background: viewMode === mode ? COLORS.accent : 'transparent', color: viewMode === mode ? COLORS.bgLight : COLORS.textPrimary, border: 'none', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
-                {mode === '2D' ? '2D PLAN' : mode === '3D' ? '3D VIEW' : 'GRAPH VIEW'}
+              <button key={mode} onClick={() => setViewMode(mode)} style={{ padding: '0 16px', background: 'transparent', color: viewMode === mode ? COLORS.accent : COLORS.textSecondary, border: 'none', borderBottom: `2px solid ${viewMode === mode ? COLORS.accent : 'transparent'}`, cursor: 'pointer', fontWeight: '600', fontSize: '10px', letterSpacing: '1.2px', textTransform: 'uppercase' }}>
+                {mode === '2D' ? '2D Plan' : mode === '3D' ? '3D View' : 'Graph'}
               </button>
             ))}
           </div>
           {viewMode === '2D' && (
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => handleStraighten(true)} disabled={isCalculating} style={{ padding: '10px 15px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
-                {isCalculating ? 'Processing...' : 'Randomize'}
-              </button>
-              <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ padding: '10px 25px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase', opacity: isCalculating ? 0.6 : 1 }}>
-                {isCalculating ? 'Calculating...' : 'Auto-Layout'}
-              </button>
-              <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ padding: '10px 15px', background: COLORS.bgLight, color: '#5d6a4d', border: `1px solid #7d8a6a`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px', letterSpacing: '0.5px', textTransform: 'uppercase' }}>
-                + Green Areas
-              </button>
-            </div>
+            <button onClick={handleFillGreen} title="Fill leftover ground-floor space with green areas" style={{ ...UI.ghostBtn, color: '#5d6a4d', borderColor: '#7d8a6a' }}>
+              + Green
+            </button>
           )}
+          <div style={UI.vRule} />
+          <button onClick={handleAutoConfigure} disabled={isCalculating}
+            title="One click: auto-decides residents & floors and generates the whole multi-floor massing building (40% of the site kept as green)"
+            style={{ ...UI.primaryBtn, cursor: isCalculating ? 'not-allowed' : 'pointer', opacity: isCalculating ? 0.6 : 1 }}>
+            {isCalculating ? 'Generating Building…' : '✦ Auto Configure Building'}
+          </button>
         </div>
       </div>
+
+      {/* Auto Configure confirmation toast */}
+      {configMsg && (
+        <div style={{ position: 'fixed', top: '80px', left: '50%', transform: 'translateX(-50%)', zIndex: 5000,
+          background: COLORS.accent, color: '#ffffff', padding: '12px 22px', borderRadius: '3px',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', gap: '14px', maxWidth: '70vw' }}>
+          <span style={{ fontSize: '14px' }}>✦</span>
+          <span style={{ fontSize: '12px', letterSpacing: '0.3px' }}>{configMsg}</span>
+          <span onClick={() => setConfigMsg(null)} style={{ cursor: 'pointer', fontWeight: '700', fontSize: '15px', lineHeight: 1, opacity: 0.8 }}>×</span>
+        </div>
+      )}
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         {/* LEFT PANEL */}
-        <div style={{ width: '240px', flexShrink: 0, background: COLORS.bgMedium, borderRight: `1px solid ${COLORS.borderMedium}`, padding: '20px', display: 'flex', flexDirection: 'column', zIndex: 10, overflowY: 'auto' }}>
-          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '13px' }}>FLOORS</h3>
+        <div style={{ width: '244px', flexShrink: 0, background: COLORS.bgLight, borderRight: `1px solid ${COLORS.borderDark}`, padding: '26px 22px', display: 'flex', flexDirection: 'column', zIndex: 10, overflowY: 'auto' }}>
+          <h3 style={UI.sectionLabel}>Floors</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '15px' }}>
             {floors.map(f => (
               <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? COLORS.bgLight : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>{floorLabel(f)}</button>
+                <button onClick={() => setActiveFloor(f)} style={{ flex: 1, padding: '10px', background: activeFloor === f ? COLORS.accent : COLORS.bgLight, color: activeFloor === f ? '#ffffff' : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>{floorLabel(f)}</button>
                 <button onClick={() => handleDeleteFloor(f)} style={{ padding: '8px 6px', background: '#b86868', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '500', fontSize: '12px' }}>×</button>
               </div>
             ))}
@@ -1369,8 +1786,8 @@ function App() {
           <button onClick={handleAddFloor} style={{ padding: '10px', background: 'transparent', color: COLORS.accent, border: `1px dashed ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '500', marginBottom: '20px', fontSize: '12px' }}>+ Add Floor</button>
 
           {/* DATA ANALYTICS */}
-          <div style={{ marginTop: '25px', padding: '15px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.textPrimary, margin: '0 0 15px 0', fontSize: '11px', letterSpacing: '1px', fontWeight: '700' }}>DATA ANALYTICS</h4>
+          <div style={{ marginTop: '28px', paddingTop: '22px', borderTop: `1px solid ${COLORS.borderMedium}` }}>
+            <h4 style={UI.sectionLabel}>Data Analytics</h4>
             {[
               { label: 'Built Area:', value: `${metrics.totalM2} m²`, color: COLORS.textSecondary },
               { label: 'Usable Space:', value: `${metrics.usableM2} m²`, color: COLORS.textPrimary },
@@ -1392,8 +1809,8 @@ function App() {
           </div>
 
           {/* SITE BOUNDARY */}
-          <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SITE BOUNDARY</h4>
+          <div style={{ marginTop: '24px', paddingTop: '22px', borderTop: `1px solid ${COLORS.borderMedium}` }}>
+            <h4 style={UI.sectionLabel}>Site Boundary</h4>
             <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>SITE:</span> {siteBoundary.name}</div>
               {siteBoundary.metadata?.original_area_m2 && <div style={{ marginBottom: '6px' }}><span style={{ fontWeight: '600' }}>AREA:</span> {siteBoundary.metadata.original_area_m2.toFixed(0)} m²</div>}
@@ -1402,8 +1819,8 @@ function App() {
           </div>
 
           {/* SHADOW & DAYLIGHT CONTROLS */}
-          <div style={{ marginTop: '15px', padding: '12px', background: COLORS.bgLight, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
-            <h4 style={{ color: COLORS.accent, margin: '0 0 8px 0', fontSize: '11px', fontWeight: '700', letterSpacing: '0.5px', textTransform: 'uppercase' }}>SHADOW & DAYLIGHT (LONDON)</h4>
+          <div style={{ marginTop: '24px', paddingTop: '22px', borderTop: `1px solid ${COLORS.borderMedium}` }}>
+            <h4 style={UI.sectionLabel}>Shadow &amp; Daylight — London</h4>
             <div style={{ fontSize: '11px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
                 <span>Month:</span><span>{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][solarMonth - 1]}</span>
@@ -1422,14 +1839,14 @@ function App() {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: COLORS.bgLight, overflow: 'hidden', position: 'relative' }}>
           {viewMode === 'GRAPH' ? (
             <div id="view-graph" onContextMenu={e => handleRightClickExport(e, 'GRAPH')} style={{ width: '100%', height: '100%', background: COLORS.bgLight, position: 'relative' }}>
-              <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
+              <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, background: COLORS.bgLight, padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
                 <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>Topology Graph</h3>
                 <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: COLORS.textSecondary }}>Space Syntax node-edge mapping.</p>
-                <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ width: '100%', padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '11px', opacity: isCalculating ? 0.6 : 1 }}>
+                <button onClick={() => handleStraighten(false)} disabled={isCalculating} style={{ width: '100%', padding: '8px 12px', background: COLORS.accent, color: '#ffffff', border: 'none', borderRadius: '4px', cursor: isCalculating ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '11px', opacity: isCalculating ? 0.6 : 1 }}>
                   {isCalculating ? 'Processing...' : '↻ Refresh Connections'}
                 </button>
               </div>
-              <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 10, background: 'rgba(255,255,255,0.95)', padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}`, minWidth: '180px' }}>
+              <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 10, background: COLORS.bgLight, padding: '15px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}`, minWidth: '180px' }}>
                 <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', color: COLORS.textPrimary }}>Node Typologies</h4>
                 {[['#9a9690','Core / Circulation'],['#6e2424','Residential Unit'],['#6a665f','Private Communal'],['#b0746c','Public Buffer'],['#7d8a6a','Green Area']].map(([color, label]) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
@@ -1477,18 +1894,34 @@ function App() {
             </div>
 
           ) : viewMode === '3D' ? (
-            <div id="view-3d" onContextMenu={e => handleRightClickExport(e, '3D')} style={{ width: '100%', height: '100%', background: COLORS.bgLight }}>
+            <div id="view-3d" onContextMenu={e => handleRightClickExport(e, '3D')}
+              onWheel={e => { const f = e.deltaY < 0 ? 1.12 : 0.89; setAxoZoomMult(z => Math.max(0.3, Math.min(5, z * f))); }}
+              onMouseDown={e => { if (e.button === 0) axoDragRef.current = { x: e.clientX, y: e.clientY }; }}
+              onMouseMove={e => { if (axoDragRef.current) { const dx = e.clientX - axoDragRef.current.x, dy = e.clientY - axoDragRef.current.y; axoDragRef.current = { x: e.clientX, y: e.clientY }; setAxoPan(p => ({ x: p.x + dx, y: p.y + dy })); } }}
+              onMouseUp={() => { axoDragRef.current = null; }}
+              onMouseLeave={() => { axoDragRef.current = null; }}
+              style={{ width: '100%', height: '100%', background: COLORS.bgLight, cursor: axoDragRef.current ? 'grabbing' : 'grab' }}>
               <div className="no-export" style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10 }}>
-                <div style={{ background: 'rgba(255,255,255,0.8)', padding: '15px', borderRadius: '8px', marginBottom: '15px', border: `1px solid ${COLORS.borderMedium}` }}>
-                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 5px 0', fontSize: '13px', fontWeight: '600' }}>3D Massing Model</h3>
-                  <p style={{ margin: 0, fontSize: '11px', color: COLORS.textSecondary }}>Left Click = Orbit | Right Click = Pan | Scroll = Zoom</p>
+                <div style={{ background: COLORS.bgLight, padding: '15px', borderRadius: '8px', marginBottom: '15px', border: `1px solid ${COLORS.borderMedium}` }}>
+                  <h3 style={{ color: COLORS.textPrimary, margin: '0 0 8px 0', fontSize: '13px', fontWeight: '600' }}>3D Massing Model</h3>
+                  <p style={{ margin: '0 0 10px 0', fontSize: '11px', color: COLORS.textSecondary }}>Axonometric view — pick a corner | Drag = Pan | Scroll = Zoom</p>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {['NW', 'NE', 'SW', 'SE'].map(v => (
+                      <button key={v} onClick={() => { setAxoView(v); setAutoOrbit(false); setAxoPan({ x: 0, y: 0 }); }}
+                        style={{ padding: '6px 12px', background: (!autoOrbit && axoView === v) ? COLORS.accent : COLORS.bgMedium, color: (!autoOrbit && axoView === v) ? '#ffffff' : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '11px' }}>{v}</button>
+                    ))}
+                    <button onClick={() => setAutoOrbit(o => !o)}
+                      style={{ padding: '6px 12px', background: autoOrbit ? COLORS.accent : COLORS.bgMedium, color: autoOrbit ? '#ffffff' : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '11px' }}>↻ Orbit</button>
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
-                  <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Massing .OBJ</button>
+                  <button onClick={() => setFurnishedMode(m => !m)} style={{ padding: '8px 15px', background: furnishedMode ? COLORS.accent : COLORS.bgLight, color: furnishedMode ? '#ffffff' : COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>{furnishedMode ? 'Furnished ●' : 'Massing ○'}</button>
+                  <button onClick={handleExportOBJ} style={{ padding: '8px 15px', background: COLORS.accent, color: '#ffffff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Massing .OBJ</button>
                   <button onClick={handleExportWireframeOBJ} style={{ padding: '8px 15px', background: COLORS.textPrimary, color: COLORS.bgLight, border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Export Wireframe .OBJ</button>
                 </div>
               </div>
-              <Canvas shadows camera={CAMERA_SETTINGS} gl={{ preserveDrawingBuffer: true }}>
+              <Canvas shadows gl={{ preserveDrawingBuffer: true }}>
+                <AxoCamera view={axoView} zoom={axoZoom} autoOrbit={autoOrbit} pan={axoPan} />
                 <SceneCapturer sceneRef={sceneRef} />
                 <ambientLight intensity={sunPos.isDaylight ? 0.3 : 0.1} />
                 {sunPos.isDaylight && (
@@ -1505,8 +1938,7 @@ function App() {
                     shadow-bias={-0.0005}
                   />
                 )}
-                <OrbitControls />
-                <gridHelper args={[200, 200, '#cccccc', '#e0e0e0']} position={[0, -0.1, 0]} />
+                <gridHelper args={[200, 200, COLORS.bgLight === '#ffffff' ? '#cccccc' : '#2b2f34', COLORS.bgLight === '#ffffff' ? '#e0e0e0' : '#212429']} position={[0, -0.1, 0]} />
                 
                 <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.15, 0]} receiveShadow>
                   <planeGeometry args={[500, 500]} />
@@ -1515,14 +1947,27 @@ function App() {
 
                 <Boundary3D boundary={siteBoundary} scale={GRID_SIZE} />
                 <group>
-                  {rooms.map(room => (
-                    <ModularMesh 
-                      key={`3d-${room.id}`} 
-                      room={room} 
-                      scale={GRID_SIZE} 
-                      boundary={siteBoundary} 
-                    />
-                  ))}
+                  <Suspense fallback={null}>
+                    {rooms.map(room => {
+                      const model = furnishedMode ? getRoomModel(room.category, room.shapeVariant) : null;
+                      return model ? (
+                        <RoomModel
+                          key={`model-${room.id}`}
+                          room={room}
+                          scale={GRID_SIZE}
+                          boundary={siteBoundary}
+                          model={model}
+                        />
+                      ) : (
+                        <ModularMesh
+                          key={`3d-${room.id}`}
+                          room={room}
+                          scale={GRID_SIZE}
+                          boundary={siteBoundary}
+                        />
+                      );
+                    })}
+                  </Suspense>
                 </group>
               </Canvas>
             </div>
@@ -1531,7 +1976,7 @@ function App() {
             <div style={{ display: 'flex', flex: 1, padding: '20px', background: COLORS.bgLight, overflowX: 'auto', gap: '20px' }}>
               {floors.map(floor => (
                 <div id={`view-2d-${floor}`} key={floor} onContextMenu={e => handleRightClickExport(e, '2D', floor)}
-                  style={{ flex: '1 0 auto', minWidth: '820px', display: 'flex', flexDirection: 'column', background: COLORS.bgDark, borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}`, position: 'relative', overflow: 'hidden' }}
+                  style={{ flex: '1 0 auto', minWidth: '820px', display: 'flex', flexDirection: 'column', background: COLORS.bgDark, borderRadius: '2px', border: `1px solid ${COLORS.borderMedium}`, position: 'relative', overflow: 'hidden' }}
                   onMouseDown={handleCanvasMouseDown}
                   onMouseMove={handleCanvasMouseMove}
                   onMouseUp={handleCanvasMouseUpOrLeave}
@@ -1705,10 +2150,10 @@ function App() {
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       {[
-                        { label: 'Lock All',   action: () => handlePinFloor(floor, true),  bg: COLORS.accentDark, color: COLORS.bgLight, border: 'none' },
+                        { label: 'Lock All',   action: () => handlePinFloor(floor, true),  bg: COLORS.accentDark, color: '#ffffff', border: 'none' },
                         { label: 'Unlock All', action: () => handlePinFloor(floor, false), bg: COLORS.bgMedium,   color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}` },
                         { label: 'Clear Floor',action: () => handleResetFloor(floor),      bg: '#b86868',         color: 'white', border: 'none' },
-                        { label: 'Export JSON',action: () => handleExportFloorJSON(floor), bg: COLORS.accent,     color: COLORS.bgLight, border: 'none' },
+                        { label: 'Export JSON',action: () => handleExportFloorJSON(floor), bg: COLORS.accent,     color: '#ffffff', border: 'none' },
                       ].map(btn => (
                         <button key={btn.label} onClick={btn.action} style={{ padding: '4px 10px', background: btn.bg, color: btn.color, border: btn.border, borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: '600', pointerEvents: 'auto' }}>{btn.label}</button>
                       ))}
@@ -1716,7 +2161,7 @@ function App() {
                   </div>
 
                   {/* Help overlay */}
-                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600', zIndex: 10, background: 'rgba(255,255,255,0.8)', padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
+                  <div className="no-export" style={{ position: 'absolute', top: '20px', right: '20px', color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600', zIndex: 10, background: COLORS.bgLight, padding: '8px 12px', borderRadius: '4px', textAlign: 'right', lineHeight: '1.5', pointerEvents: 'none', border: `1px solid ${COLORS.borderMedium}` }}>
                     <span style={{ color: COLORS.accent }}>Double-Click:</span> Lock/Pin<br/>
                     <span style={{ color: COLORS.accent }}>Select + Delete:</span> Delete Room<br/>
                     <span style={{ color: COLORS.accent }}>Right-Click (Room):</span> Rotate<br/>
@@ -1725,38 +2170,38 @@ function App() {
                   </div>
 
                   {/* Zoom controls */}
-                  <div className="no-export" style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 20, display: 'flex', gap: '8px', background: 'rgba(255,255,255,0.8)', padding: '10px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
+                  <div className="no-export" style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 20, display: 'flex', gap: '8px', background: COLORS.bgLight, padding: '10px', borderRadius: '8px', border: `1px solid ${COLORS.borderMedium}` }}>
                     <button onClick={() => handleZoomStep(false)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Zoom Out</button>
                     <span style={{ padding: '8px 10px', color: COLORS.textSecondary, fontSize: '11px', display: 'flex', alignItems: 'center', fontWeight: '600', minWidth: '45px', justifyContent: 'center' }}>{(canvasZoom * 100).toFixed(0)}%</span>
                     <button onClick={() => handleZoomStep(true)} style={{ padding: '8px 10px', background: COLORS.bgMedium, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '12px' }}>Zoom In</button>
-                    <button onClick={() => { const { zoom, pan } = calculateOptimalZoom(siteBoundary); setCanvasZoom(zoom); setCanvasPan(pan); }} style={{ padding: '8px 12px', background: COLORS.accent, color: COLORS.bgLight, border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '11px', whiteSpace: 'nowrap' }}>Fit Boundary</button>
+                    <button onClick={() => { const { zoom, pan } = calculateOptimalZoom(siteBoundary); setCanvasZoom(zoom); setCanvasPan(pan); }} style={{ padding: '8px 12px', background: COLORS.accent, color: '#ffffff', border: `1px solid ${COLORS.accent}`, borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '11px', whiteSpace: 'nowrap' }}>Fit Boundary</button>
                   </div>
                 </div>
               ))}
             </div>
           )}
+
+          {/* In-pane 3D unit viewer — overlays only the middle view */}
+          {expandedModel && (
+            <CatalogModelModal
+              model={expandedModel.model}
+              title={expandedModel.title}
+              onBack={() => { setExpandedModel(null); setViewMode('2D'); }}
+              onSpawn={() => {
+                handleAddCatalogRoom('Residential Unit', expandedModel.title, CATALOG_DATA[expandedModel.title][0]);
+                setExpandedModel(null);
+                setViewMode('2D');
+              }}
+            />
+          )}
         </div>
 
         {/* RIGHT PANEL — Component Library */}
-        <div style={{ width: '280px', flexShrink: 0, background: COLORS.bgMedium, borderLeft: `1px solid ${COLORS.borderMedium}`, padding: '20px', overflowY: 'auto', zIndex: 10 }}>
-          <h3 style={{ color: COLORS.textPrimary, marginTop: 0, letterSpacing: '1px', marginBottom: '20px', fontWeight: '700', fontSize: '13px' }}>Component Library</h3>
+        <div style={{ width: '284px', flexShrink: 0, background: COLORS.bgLight, borderLeft: `1px solid ${COLORS.borderDark}`, padding: '26px 22px', overflowY: 'auto', zIndex: 10 }}>
+          <h3 style={UI.sectionLabel}>Component Library</h3>
 
-          {Object.entries(communalComponents).map(([groupName, items]) => (
-            <div key={groupName} style={{ marginBottom: '25px' }}>
-              <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>{groupName}</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {items.map(itemName => (
-                  <button key={itemName} onClick={() => handleAddRoom(groupName, itemName)}
-                    style={{ padding: '8px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '11px' }}>
-                    + {itemName}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-
-          <div style={{ marginBottom: '25px' }}>
-            <div style={{ color: COLORS.textSecondary, fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '5px' }}>Residential Unit Catalog</div>
+          <div style={{ marginBottom: '26px' }}>
+            <div style={UI.sectionLabel}>Residential Unit Catalog</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {residentialComponents.map(itemName => {
                 const isActive = activeCatalogContext === itemName;
@@ -1771,28 +2216,53 @@ function App() {
             </div>
           </div>
 
+          {Object.entries(communalComponents).map(([groupName, items]) => (
+            <div key={groupName} style={{ marginBottom: '26px' }}>
+              <div style={UI.sectionLabel}>{groupName}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {items.map(itemName => (
+                  <button key={itemName} onClick={() => handleAddRoom(groupName, itemName)}
+                    style={{ padding: '8px', background: COLORS.bgLight, color: COLORS.textPrimary, border: `1px solid ${COLORS.borderMedium}`, borderLeft: `5px solid ${COLORS.borderMedium}`, borderRadius: '4px', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '11px' }}>
+                    + {itemName}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+
           {activeCatalogContext && (
             <div style={{ position: 'fixed', top: Math.max(8, Math.min(catalogAnchorTop, window.innerHeight - (90 + CATALOG_DATA[activeCatalogContext].length * 74))), right: 296, width: 250, background: COLORS.bgLight, border: `1px solid ${COLORS.borderMedium}`, borderRadius: '6px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', padding: '14px', zIndex: 50, maxHeight: '85vh', overflowY: 'auto' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                 <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600' }}>{activeCatalogContext} Options</div>
                 <span onClick={() => setActiveCatalogContext(null)} style={{ cursor: 'pointer', color: COLORS.textSecondary, fontWeight: '700', fontSize: '16px', lineHeight: '1' }}>×</span>
               </div>
-              {CATALOG_DATA[activeCatalogContext].map((opt, i) => (
-                <div key={i} onClick={() => handleAddCatalogRoom("Residential Unit", activeCatalogContext, opt)}
-                  style={{ background: 'rgba(255,255,255,0.5)', borderBottom: `1px solid ${COLORS.borderMedium}`, padding: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '5px' }}>
-                  <div style={{ width: '35px', height: '35px', background: 'rgba(77,163,255,0.1)', borderRadius: '4px' }}>
-                    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
-                      <polygon points={opt.path} fill="rgba(77,163,255,0.5)" stroke={COLORS.accent} strokeWidth="4" />
-                    </svg>
+              {CATALOG_DATA[activeCatalogContext].map((opt, i) => {
+                const optModel = getRoomModel(`Residential Unit - ${activeCatalogContext}`, opt.variant);
+                return (
+                  <div key={i} style={{ marginBottom: '10px', borderBottom: `1px solid ${COLORS.borderMedium}`, paddingBottom: '8px' }}>
+                    {optModel && (
+                      <CatalogModelPreview
+                        model={optModel}
+                        onExpand={() => { setExpandedModel({ model: optModel, title: `${activeCatalogContext} — ${opt.opt}` }); setActiveCatalogContext(null); }}
+                      />
+                    )}
+                    <div onClick={() => handleAddCatalogRoom("Residential Unit", activeCatalogContext, opt)}
+                      style={{ background: COLORS.bgMedium, padding: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <div style={{ width: '35px', height: '35px', background: 'rgba(77,163,255,0.1)', borderRadius: '4px' }}>
+                        <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
+                          <polygon points={opt.path} fill="rgba(77,163,255,0.5)" stroke={COLORS.accent} strokeWidth="4" />
+                        </svg>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600' }}>{opt.opt}</div>
+                        <div style={{ color: COLORS.textSecondary, fontSize: '11px', marginTop: '2px' }}>Area: {opt.area} m²</div>
+                        <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
+                      </div>
+                      <div style={{ color: COLORS.accent, fontWeight: '600', fontSize: '16px' }}>+</div>
+                    </div>
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ color: COLORS.textPrimary, fontSize: '11px', fontWeight: '600' }}>{opt.opt}</div>
-                    <div style={{ color: COLORS.textSecondary, fontSize: '11px', marginTop: '2px' }}>Area: {opt.area} m²</div>
-                    <div style={{ color: COLORS.accent, fontSize: '11px', fontWeight: '600', marginTop: '2px' }}>Score: {opt.score}</div>
-                  </div>
-                  <div style={{ color: COLORS.accent, fontWeight: '600', fontSize: '16px' }}>+</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

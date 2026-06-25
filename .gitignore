@@ -1,3 +1,7 @@
 .venv/
 node_modules/
 __pycache__/
+
+# Raw Rhino GLB source library (~340 MB) — too large for git.
+# The optimized, app-served versions live in frontend/public/models/ and ARE committed.
+frontend/glbs_room/
