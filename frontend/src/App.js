@@ -245,6 +245,19 @@ function getLondonSolarPosition(month, hour) {
 
 // ============================================
 // CATALOG DATA (Precise 1x1m Mapping)
+// One source of truth for typology metadata used by the Typology dropdown + Auto Configure.
+// density ≈ the fraction of the site this typology's massing actually occupies, so units/floor
+// scale down for compact forms (see floor_footprint in BACKEND/main.py). mat/courtyard fill the
+// site; grand-gotto is a tapering 0.34·min-half tower with a central void; swiss-cheese a
+// 0.32·min-half cube minus 3 holes; blocks-stack 4 quads minus the central cross.
+const TYPOLOGIES = {
+  'mat':                   { label: 'Integrated Mat',         floors: 2, density: 1.0 },
+  'courtyard':             { label: 'Courtyard Block',        floors: 3, density: 0.8 },
+  'grand-gotto':           { label: 'Grand Gotto (Terraced)', floors: 7, density: 0.55 },
+  'swiss-cheese':          { label: 'Swiss Cheese',           floors: 6, density: 0.65 },
+  'building-blocks-stack': { label: 'Building Blocks Stack',  floors: 4, density: 0.55 },
+};
+
 // ============================================
 // Footprints traced from the uploaded unit plans. All grids are integer
 // metres (1 cell = 1m), so gw*gh (minus notches) equals area in m².
@@ -253,15 +266,15 @@ const CATALOG_DATA = {
   // (from rooms_massing.json) so the 2D plan matches the 3D wall panels and rotates
   // identically. True concave outlines aren't recoverable from the export (door gaps).
   "Studio": [
-    // Studio_A (rooms_massing): 10x4, 40m²
-    { opt: "Layout A", area: 40, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 4 },
-    // Studio_B (rooms_massing): 6x8, 48m²
-    { opt: "Layout B", area: 48, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 6, gh: 8 },
+    // Studio_A (rooms_massing): 10x5, 50m²
+    { opt: "Layout A", area: 50, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 5 },
+    // Studio_B (rooms_massing): 6x9, 54m²
+    { opt: "Layout B", area: 54, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 6, gh: 9 },
   ],
   "1 Bedroom": [
     // 1Bed_A (rooms_massing): 10x6, 60m²
     { opt: "Layout A", area: 60, score: 0.94, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 10, gh: 6 },
-    // 1Bed_B (rooms_massing): 8x7, 56m²
+    // 1Bed_B (massing_json): 8x7, 56m²
     { opt: "Layout B", area: 56, score: 0.92, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 8, gh: 7 },
   ],
   "2 Bedroom": [
@@ -271,15 +284,15 @@ const CATALOG_DATA = {
     { opt: "Layout B", area: 60, score: 0.93, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 10, gh: 6 },
   ],
   "3 Bedroom": [
-    // 3Bed_A (rooms_massing): 9x6, 54m², double-height (6m); rectangle
-    { opt: "Layout A", area: 54, score: 0.96, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 9, gh: 6 },
-    // 3Bed_B (rooms_massing): 11x5, 55m², double-height (6m); rectangle
-    { opt: "Layout B", area: 55, score: 0.89, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 11, gh: 5 },
+    // 3Bed_A (massing_json): 9x5, 45m², double-height (6m); rectangle
+    { opt: "Layout A", area: 45, score: 0.96, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 9, gh: 5 },
+    // 3Bed_B (massing_json): 10x5, 50m², double-height (6m); rectangle
+    { opt: "Layout B", area: 50, score: 0.89, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 10, gh: 5 },
   ],
   "4 Bedroom": [
-    // 4Bed_A (rooms_massing): 11x7, 77m², double-height (6m); rectangle
-    { opt: "Layout A", area: 77, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 11, gh: 7 },
-    // 4Bed_B (rooms_massing): 9x7, 63m², double-height (6m); rectangle
+    // 4Bed_A (massing_json): 11x6, 66m², double-height (6m); rectangle
+    { opt: "Layout A", area: 66, score: 0.95, path: "0,0 100,0 100,100 0,100", variant: 0, gw: 11, gh: 6 },
+    // 4Bed_B (massing_json): 9x7, 63m², double-height (6m); rectangle
     { opt: "Layout B", area: 63, score: 0.90, path: "0,0 100,0 100,100 0,100", variant: 1, gw: 9, gh: 7 },
   ],
 };
@@ -436,18 +449,21 @@ const WALL_THICKNESS = 0.12; // m — visual thickness of a 1m panel
 const WallPanels = ({ unit, w, d, flipX, color, shapePath }) => {
   const FLOOR_T = 0.12; // thin floor slab thickness (m)
   const isDoubleHeight = (unit.size?.[2] || 3) >= 6;
-  // Floor plate follows the unit's footprint outline (shapePath), not a full bbox box.
+  // Floor plate matches the unit's actual wall footprint (unit.size), NOT the placement box
+  // (w,d) which can be stale and make the slab overhang the walls. Falls back to w,d.
+  const fw = unit.size?.[0] || w;
+  const fd = unit.size?.[1] || d;
   const floorShape = useMemo(() => {
     const path = shapePath || '0,0 100,0 100,100 0,100';
     const pts = path.trim().split(' ').map(p => {
       const [px, py] = p.split(',');
-      let lx = (parseFloat(px) / 100 - 0.5) * w;
-      const ly = -(parseFloat(py) / 100 - 0.5) * d;
+      let lx = (parseFloat(px) / 100 - 0.5) * fw;
+      const ly = -(parseFloat(py) / 100 - 0.5) * fd;
       if (flipX) lx = -lx;
       return new THREE.Vector2(lx, ly);
     });
     return new THREE.Shape(pts);
-  }, [shapePath, w, d, flipX]);
+  }, [shapePath, fw, fd, flipX]);
   const floorMat = <meshStandardMaterial color="#c9c4bc" roughness={0.9} />;
   return (
     <group>
@@ -468,9 +484,10 @@ const WallPanels = ({ unit, w, d, flipX, color, shapePath }) => {
         const dx = Math.max(sx, WALL_THICKNESS);
         const dy = Math.max(sy, WALL_THICKNESS);
         const dz = Math.max(sz, WALL_THICKNESS);
-        // unit-local grid -> mesh-local frame (matches the solid extrude convention)
-        let cxl = (gx + sx / 2) - w / 2;
-        const cyl = d / 2 - (gy + sy / 2);
+        // unit-local grid -> mesh-local frame (centred on the true wall footprint fw/fd so
+        // floor plate and walls always share the same reference frame)
+        let cxl = (gx + sx / 2) - fw / 2;
+        const cyl = fd / 2 - (gy + sy / 2);
         const czl = gz + sz / 2;
         if (flipX) cxl = -cxl;
         return (
@@ -1236,6 +1253,57 @@ function App() {
     return greens;
   };
 
+  // Grand-gotto terraces: reveal the ziggurat taper by GREENING each floor's step-back —
+  // the roof of the ring BELOW that this (smaller) floor leaves exposed. A 2 m grid per
+  // floor marks cells covered by the floor below's massing but NOT by this floor's massing;
+  // those become flat green terrace tiles placed ON this floor (so they sit at the roof
+  // level of the floor below). Mirrors computeGroundGreenFill's merge-into-strips approach.
+  const computeGrandGottoTerraces = (occupants, floorsList) => {
+    const cell = GRID_SIZE * 2; // 2 m tiles
+    const solid = (r) => {
+      const c = (r.category || '').toLowerCase();
+      return !c.includes('green') && !c.includes('garden') && !c.includes('playground');
+    };
+    const boxesOnFloor = (f) => occupants.filter(r => r.floor === f && solid(r)).map(r => [r.x, r.y, r.width, r.height]);
+    const covered = (boxes, x, y) => boxes.some(([ox, oy, ow, oh]) => x >= ox && x <= ox + ow && y >= oy && y <= oy + oh);
+    const makeTerrace = (x, y, w, h, f) => ({
+      id: `Terrace (${f}-${Math.floor(Math.random() * 100000)})`,
+      category: 'Green Area - Terrace', floor: f, x, y, width: w, height: h,
+      bgColor: 'rgba(125, 138, 106, 0.45)', borderColor: '#7d8a6a',
+      shapePath: '0,0 100,0 100,100 0,100', shapeVariant: 0, optName: null, score: null,
+      area: Math.round((w / GRID_SIZE) * (h / GRID_SIZE)),
+      rotation: 0, flipX: false, pinned: true, floor_height: GREEN_AREA_HEIGHT, struct_type: 'C2B',
+    });
+
+    const terraces = [];
+    const sortedFloors = [...floorsList].sort((a, b) => a - b);
+    for (let i = 1; i < sortedFloors.length; i++) {
+      const f = sortedFloors[i], prev = sortedFloors[i - 1];
+      const below = boxesOnFloor(prev);
+      const here = boxesOnFloor(f);
+      if (below.length === 0) continue;
+      // Grid over the floor-below footprint (terraces can only exist over its roof).
+      const bMinX = Math.min(...below.map(o => o[0]));
+      const bMinY = Math.min(...below.map(o => o[1]));
+      const bMaxX = Math.max(...below.map(o => o[0] + o[2]));
+      const bMaxY = Math.max(...below.map(o => o[1] + o[3]));
+      const cols = Math.ceil((bMaxX - bMinX) / cell), rows = Math.ceil((bMaxY - bMinY) / cell);
+      for (let r = 0; r < rows; r++) {
+        let runStart = null;
+        for (let c = 0; c <= cols; c++) {
+          const x = bMinX + c * cell + cell / 2, y = bMinY + r * cell + cell / 2;
+          const isTerrace = c < cols && covered(below, x, y) && !covered(here, x, y);
+          if (isTerrace && runStart === null) runStart = c;
+          if (!isTerrace && runStart !== null) {
+            terraces.push(makeTerrace(bMinX + runStart * cell, bMinY + r * cell, (c - runStart) * cell, cell, f));
+            runStart = null;
+          }
+        }
+      }
+    }
+    return terraces;
+  };
+
   const handleFillGreen = () => {
     const greens = computeGroundGreenFill(rooms);
     if (greens.length === 0) { alert("No enclosed interior space (courtyard) to fill with green."); return; }
@@ -1284,13 +1352,16 @@ function App() {
       const pxArea = (b.maxX - b.minX) * (b.maxY - b.minY);
       const siteAreaM2 = b?.metadata?.original_area_m2 || pxArea / (GRID_SIZE * GRID_SIZE);
 
-      // Floor count by typology (terraced / stacked forms want more storeys).
-      const floorByType = { mat: 2, courtyard: 3, 'grand-gotto': 5, 'swiss-cheese': 2, 'building-blocks-stack': 4 };
-      const floorCount = floorByType[layoutType] || 3;
+      // Typology metadata (floors + footprint density) from the shared TYPOLOGIES config.
+      // Tolerant lookup so a stray/upper-case key still resolves instead of silently drifting.
+      const t = TYPOLOGIES[layoutType] || TYPOLOGIES.mat;
+      const floorCount = t.floors;
       // Keep the build LIGHT and the typology forms READABLE: only a modest number of
       // units per floor so rings / quads / holes read as clean shapes (not a dense
       // blob), and the rest of the site greens over. Capped so big sites stay sculptural.
-      const basePerFloor = Math.max(4, Math.min(24, Math.round((siteAreaM2 * 0.10) / 30)));
+      // Scale by the typology's footprint density so compact forms (swiss-cheese, grand-gotto)
+      // don't overpack their small massing while mat/courtyard still fill the site.
+      const basePerFloor = Math.max(4, Math.min(24, Math.round((siteAreaM2 * 0.10 * t.density) / 30)));
 
       const newFloors = Array.from({ length: floorCount }, (_, i) => i + 1);
       const rv = (name) => CATALOG_DATA[name][Math.floor(Math.random() * CATALOG_DATA[name].length)];
@@ -1330,7 +1401,9 @@ function App() {
         // Keep ~40% of the site as green: fill the leftover ground-floor space with
         // green tiles around the solved massing.
         const greens = computeGroundGreenFill(sorted);
-        const finalRooms = [...sorted, ...greens];
+        // Grand-gotto: green the stepped-back roofs so the ziggurat taper reads as terraces.
+        const terraces = layoutType === 'grand-gotto' ? computeGrandGottoTerraces(sorted, newFloors) : [];
+        const finalRooms = [...sorted, ...greens, ...terraces];
         setFloors(newFloors);
         setActiveFloor(1);
         setPopulation(totalResidents);
@@ -1709,11 +1782,7 @@ function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             <label style={UI.microLabel}>Typology</label>
             <select value={layoutType} onChange={e => setLayoutType(e.target.value)} style={UI.field}>
-              <option value="mat">Integrated Mat</option>
-              <option value="courtyard">Courtyard Block</option>
-              <option value="grand-gotto">Grand Gotto (Terraced)</option>
-              <option value="swiss-cheese">Swiss Cheese</option>
-              <option value="building-blocks-stack">Building Blocks Stack</option>
+              {Object.entries(TYPOLOGIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
