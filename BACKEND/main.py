@@ -69,9 +69,9 @@ class LayoutRequest(BaseModel):
     # Massing typology for the compound-colliders solver:
     #   "mat"                  – attract to nearest core; dense low-rise weave
     #   "courtyard"            – attract to a ring; open central court
-    #   "swiss-cheese"         – full block with carved void holes per floor
-    #   "building-blocks-stack"– four corner quadrants around an empty central cross
-    #   "grand-gotto"          – terraced hollow pyramid (ring steps in each floor, open grotto)
+    #   "swiss-cheese"         – compact cube tower with carved void holes per floor
+    #   "building-blocks-stack"– perimeter block: a ring of units around one central courtyard
+    #   "grand-gotto"          – terraced ziggurat (ring steps inward each floor, open grotto)
     layoutType: str = "mat"
 
 
@@ -384,7 +384,15 @@ def auto_layout(request: LayoutRequest):
 
     total_floors = max(rooms_by_floor.keys()) if rooms_by_floor else 1
 
-    def floor_footprint(lt, f, nf):
+    # Largest per-floor movable footprint area — used to size the centred perimeter block
+    # (building-blocks-stack) so its ring always has room for the rooms (no overlap/floaters)
+    # and stays the SAME on every floor so the stack aligns.
+    def _floor_mover_area(rms):
+        return sum(r.width * r.height for r in rms
+                   if "Core" not in r.category and "Corridor" not in r.category and not r.pinned)
+    max_floor_area = max((_floor_mover_area(rms) for rms in rooms_by_floor.values()), default=0.0)
+
+    def floor_footprint(lt, f, nf, floor_area=0.0):
         # Per-floor allowed footprint -> (region rects, attract_mode, void rects). Regions
         # are sub-rectangles of the site that shape the typology massing, mirroring the
         # voxel generators (grand-gotto taper, swiss-cheese holes, blocks-stack quadrants).
@@ -392,46 +400,70 @@ def auto_layout(request: LayoutRequest):
         m = border_margin
         full = (min_x + m, min_y + m, max_x - m, max_y - m)
         if lt == "grand-gotto":
-            # Terraced hollow ziggurat: each floor is a perimeter RING of rooms around a
-            # central grotto VOID, and the ring steps inward each rising floor -> a
-            # tapered pyramid with a hollow courtyard (triangular-prism section).
-            inset_x = (f - 1) * (W * 0.10)
-            inset_y = (f - 1) * (H * 0.10)
-            rx0, rx1 = min_x + m + inset_x, max_x - m - inset_x
-            ry0, ry1 = min_y + m + inset_y, max_y - m - inset_y
+            # Stacked TERRACES forming a ZIGGURAT: a WIDE base that steps EVENLY inward each
+            # rising floor (interpolating base_half -> apex_half across ALL nf floors), so
+            # every floor is a tessellated perimeter RING that reads as a terrace on the roof
+            # of the floor below. A large central GROTTO void stays open through the stack.
             cx, cy = (min_x + max_x) / 2, (min_y + max_y) / 2
-            if rx1 - rx0 < 16 * snap_grid: rx0, rx1 = cx - 8 * snap_grid, cx + 8 * snap_grid
-            if ry1 - ry0 < 16 * snap_grid: ry0, ry1 = cy - 8 * snap_grid, cy + 8 * snap_grid
-            # Hollow it out: a central void leaving a perimeter ring band of rooms.
-            band = max(3 * snap_grid, 0.32 * min(rx1 - rx0, ry1 - ry0))
+            base_half = 0.46 * min(W, H)                       # wide base, fills more of the site
+            apex_half = max(6 * snap_grid, base_half * 0.20)   # small top ring
+            t = (f - 1) / max(1, nf - 1)                       # 0 at base .. 1 at apex
+            half = max(6 * snap_grid, base_half - (base_half - apex_half) * t)
+            rx0, rx1 = cx - half, cx + half
+            ry0, ry1 = cy - half, cy + half
+            # Thin perimeter ring (~one unit deep) around a LARGE grotto -> clear terraces.
+            band = max(8 * snap_grid, 0.22 * (rx1 - rx0))
             voids, vx0, vy0, vx1, vy1 = [], rx0 + band, ry0 + band, rx1 - band, ry1 - band
             if vx1 - vx0 > 2 * snap_grid and vy1 - vy0 > 2 * snap_grid:
                 voids = [(vx0, vy0, vx1 - vx0, vy1 - vy0)]
             return [(rx0, ry0, rx1, ry1)], "grotto", voids
         if lt == "swiss-cheese":
-            # Full block, but carve a few stable holes per floor for porosity.
+            # A COMPACT central CUBE / tower with carved void VOLUMES, rather than a
+            # site-filling block scattered to the borders. Rooms pack into a centred
+            # square footprint (mat attraction toward the centred cores) and a few
+            # stable holes per floor subtract volume from the massing (porosity).
+            cx, cy = (min_x + max_x) / 2, (min_y + max_y) / 2
+            half = 0.32 * min(W, H)                 # compact tower footprint, well inside the site
+            bx0, by0, bx1, by1 = cx - half, cy - half, cx + half, cy + half
+            side = 2 * half
             rnd = random.Random(97 + f * 13)
             voids = []
-            for _ in range(5):
-                vw = rnd.uniform(W * 0.10, W * 0.18)
-                vh = rnd.uniform(H * 0.10, H * 0.18)
-                vx = rnd.uniform(min_x + m, max_x - m - vw)
-                vy = rnd.uniform(min_y + m, max_y - m - vh)
+            for _ in range(3):
+                vw = rnd.uniform(side * 0.16, side * 0.26)
+                vh = rnd.uniform(side * 0.16, side * 0.26)
+                vx = rnd.uniform(bx0, bx1 - vw)
+                vy = rnd.uniform(by0, by1 - vh)
                 voids.append((vx, vy, vw, vh))
-            return [full], "mat", voids
+            return [(bx0, by0, bx1, by1)], "mat", voids
         if lt == "building-blocks-stack":
-            # Four corner towers around a generous central courtyard. Extra outer setback
-            # (om) keeps the towers well inside the site; gx/gy size the open courtyard.
+            # Realistic PERIMETER BLOCK (Blockrand / courtyard housing — the most buildable
+            # form): a COMPACT, CENTRED ring of units wrapping a single central COURTYARD.
+            # The block side is sized to the floor's room AREA so the ring always has room
+            # for the rooms (no overlaps/floaters) — small & centred (big setback) when the
+            # programme is light, growing only as needed and never past the setback site.
+            # Same size every storey (floor_area = max across floors) so the stack aligns.
             cx, cy = (min_x + max_x) / 2, (min_y + max_y) / 2
-            om = m + snap_grid * 2          # towers sit further in from the border
-            gx, gy = W * 0.14, H * 0.14     # half-size of the central courtyard
-            quads = [
-                (min_x + om, min_y + om, cx - gx, cy - gy),
-                (cx + gx, min_y + om, max_x - om, cy - gy),
-                (min_x + om, cy + gy, cx - gx, max_y - om),
-                (cx + gx, cy + gy, max_x - om, max_y - om),
-            ]
-            return quads, "quad", []
+            k = 0.26                                        # ring depth / block side
+            fill = 0.38                                     # how tightly rooms pack the ring
+            ring_area = (floor_area / fill) if floor_area > 0 else (0.55 * min(W, H)) ** 2
+            block_side = (ring_area / (4 * k * (1 - k))) ** 0.5   # ring_area = side^2 * 4k(1-k)
+            # Cap to the site. On roomy sites the block is content-sized (well below this,
+            # giving a big setback); only a CRAMPED site hits the cap, where we allow a
+            # smaller setback so the rooms still fit rather than overlap.
+            max_side = min(W, H) - border_margin
+            block_side = max(12 * snap_grid, min(block_side, max_side))
+            # If a small site clamped the block, DEEPEN the ring (shrink the court) just
+            # enough that the rooms still fit — so a cramped site loses courtyard before it
+            # ever overlaps rooms.
+            ratio = min(0.95, ring_area / (block_side ** 2))
+            k = min(0.46, max(k, (1 - math.sqrt(max(0.0, 1 - ratio))) / 2))
+            block_half = block_side / 2
+            rx0, ry0, rx1, ry1 = cx - block_half, cy - block_half, cx + block_half, cy + block_half
+            band = max(8 * snap_grid, k * (rx1 - rx0))      # perimeter depth (double-loaded)
+            voids, vx0, vy0, vx1, vy1 = [], rx0 + band, ry0 + band, rx1 - band, ry1 - band
+            if vx1 - vx0 > 4 * snap_grid and vy1 - vy0 > 4 * snap_grid:
+                voids = [(vx0, vy0, vx1 - vx0, vy1 - vy0)]
+            return [(rx0, ry0, rx1, ry1)], "grotto", voids
         if lt == "courtyard":
             return [full], "ring", []
         return [full], "mat", []
@@ -449,7 +481,7 @@ def auto_layout(request: LayoutRequest):
         pinned_here = [r for r in placed_rooms if r.floor == floor_num and r.pinned]
 
         # Per-floor typology footprint (regions / attraction mode / voids).
-        regions, attract_mode, void_rects = floor_footprint(layout_type, floor_num, total_floors)
+        regions, attract_mode, void_rects = floor_footprint(layout_type, floor_num, total_floors, max_floor_area)
 
         def pick_region(r):
             if len(regions) == 1:
@@ -459,15 +491,14 @@ def auto_layout(request: LayoutRequest):
 
         region_by_id.clear()
 
-        # Cores are the tower ANCHORS. For "building-blocks-stack" seat ONE core per
-        # tower (quadrant) at its courtyard-facing inner corner — cloning extra cores if
-        # there are fewer than towers — so every tower is anchored and none float in the
-        # courtyard. Other typologies centre-seat the core(s).
-        if attract_mode == "quad":
+        # Core seating per typology. For "building-blocks-stack" (perimeter block) stand the
+        # stair/lift cores around the central COURTYARD, one per side facing the court, so
+        # every wing of the ring is served. Other typologies seat the core(s) below.
+        if layout_type == "building-blocks-stack":
             base = cores[0] if cores else None
-            while len(cores) < len(regions):
+            while len(cores) < 4:
                 k = len(cores)
-                nc = Room(id=f"Core ({floor_num}-{k}-{random.randint(0, 9999)})",
+                nc = Room(id=f"Core ({floor_num}-q{k}-{random.randint(0, 9999)})",
                           category="Circulation - Core", x=0.0, y=0.0,
                           width=(base.width if base else snap_grid * 4),
                           height=(base.height if base else snap_grid * 4),
@@ -477,17 +508,28 @@ def auto_layout(request: LayoutRequest):
                 nc.floor_height = base.floor_height if base else FLOOR_TO_FLOOR_HEIGHT
                 nc.struct_type = get_struct_type(nc.category)
                 cores.append(nc)
-            for qi, core in enumerate(cores[:len(regions)]):
-                qx0, qy0, qx1, qy1 = regions[qi]
-                core.x = (qx1 - core.width) if abs(qx1 - center_x) < abs(qx0 - center_x) else qx0
-                core.y = (qy1 - core.height) if abs(qy1 - center_y) < abs(qy0 - center_y) else qy0
-                region_by_id[id(core)] = regions[qi]
-            for core in cores[len(regions):]:
-                core.x, core.y = center_x - core.width / 2, center_y - core.height / 2
+            if void_rects:
+                vx, vy, vw, vh = void_rects[0]            # the central courtyard
+                cxm, cym = vx + vw / 2, vy + vh / 2
+                for k, core in enumerate(cores):
+                    if not core.pinned:
+                        side = k % 4
+                        if   side == 0: core.x, core.y = cxm - core.width / 2, vy - core.height   # N wing
+                        elif side == 1: core.x, core.y = cxm - core.width / 2, vy + vh            # S wing
+                        elif side == 2: core.x, core.y = vx - core.width, cym - core.height / 2   # W wing
+                        else:           core.x, core.y = vx + vw, cym - core.height / 2           # E wing
+                    clamp_in_site(core)
+            else:
+                for k, core in enumerate(cores):
+                    if not core.pinned:
+                        core.x = center_x - core.width / 2 + k * (core.width + snap_grid)
+                        core.y = center_y - core.height / 2
+                    clamp_in_site(core)
         elif layout_type == "swiss-cheese":
-            # Anchors at the CORNERS (per the WFC swiss-cheese logic): vertical cores
-            # pinned at opposite corners of the block, stacked through z. Clone to 2 if
-            # only one core was provided.
+            # Anchors INSIDE the compact cube (regions[0]), at opposite corners of the cube
+            # footprint and stacked through z — NOT out at the site border. This keeps the
+            # cores within the tower so corridors stay internal and the housing packs into a
+            # solid cube around them. Clone to 2 if only one core was provided.
             base = cores[0] if cores else None
             while len(cores) < 2:
                 k = len(cores)
@@ -501,17 +543,19 @@ def auto_layout(request: LayoutRequest):
                 nc.floor_height = base.floor_height if base else FLOOR_TO_FLOOR_HEIGHT
                 nc.struct_type = get_struct_type(nc.category)
                 cores.append(nc)
+            bx0, by0, bx1, by1 = regions[0]            # the cube footprint
             corners = [
-                (min_x + border_margin, min_y + border_margin),   # NW
-                (max_x - border_margin, max_y - border_margin),   # SE
-                (max_x - border_margin, min_y + border_margin),   # NE
-                (min_x + border_margin, max_y - border_margin),   # SW
+                (bx0, by0),   # NW
+                (bx1, by1),   # SE
+                (bx1, by0),   # NE
+                (bx0, by1),   # SW
             ]
             for k, core in enumerate(cores):
                 if not core.pinned:
                     cxp, cyp = corners[k % len(corners)]
-                    core.x = cxp if cxp < center_x else cxp - core.width
-                    core.y = cyp if cyp < center_y else cyp - core.height
+                    core.x = cxp if cxp <= center_x else cxp - core.width
+                    core.y = cyp if cyp <= center_y else cyp - core.height
+                region_by_id[id(core)] = regions[0]    # keep cores inside the cube
                 clamp_in_site(core)
         else:
             # ANCHORS FIRST, VERTICALLY CONTINUOUS (per the WFC plan-strategy logic:
@@ -582,8 +626,8 @@ def auto_layout(request: LayoutRequest):
                     elif mm == right: tx, ty = rg[2] - r.width / 2, r_cy
                     elif mm == top:   tx, ty = r_cx, rg[1] + r.height / 2
                     else:             tx, ty = r_cx, rg[3] - r.height / 2
-                    r.x += (tx - r_cx) * 0.06 * temp
-                    r.y += (ty - r_cy) * 0.06 * temp
+                    r.x += (tx - r_cx) * 0.09 * temp
+                    r.y += (ty - r_cy) * 0.09 * temp
                 else:  # mat: pull toward the nearest core, packing a dense weave
                     ccx, ccy = nearest_core_center(r)
                     r.x += (ccx - r_cx) * 0.05 * temp
@@ -1002,9 +1046,10 @@ def auto_layout(request: LayoutRequest):
             connected.append(b)
             remaining.remove(b)
 
-        # BRIDGES (building-blocks-stack): link adjacent tower cores across the courtyard
-        # with a corridor, so the towers are connected (like the reference bridges).
-        if attract_mode == "quad" and len(cores) >= 2:
+        # BRIDGES (building-blocks-stack): link the cores standing around the courtyard
+        # with corridors ACROSS the open court, so opposite wings of the perimeter block
+        # are connected (like the reference bridges).
+        if layout_type == "building-blocks-stack" and len(cores) >= 2:
             for ci in range(len(cores)):
                 for cj in range(ci + 1, len(cores)):
                     rect = gap_corridor(cores[ci], cores[cj])
